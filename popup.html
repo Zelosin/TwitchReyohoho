@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="popup.css" />
+  <title>Twitch ReYohoho</title>
+</head>
+<body>
+  <div class="popup">
+    <header class="popup-header">
+      <span class="logo">ReYohoho</span>
+      <span class="badge" id="statusBadge">Twitch</span>
+    </header>
+
+    <div class="section search-section">
+      <label class="label" for="searchInput">Поиск фильма</label>
+      <input
+        id="searchInput"
+        type="text"
+        placeholder="Название фильма..."
+        autocomplete="off"
+      />
+      <div id="searchResults" class="search-results hidden"></div>
+    </div>
+
+    <div id="selectedFilm" class="selected-film hidden">
+      <div class="selected-film-row">
+        <div class="selected-film-text">
+          <span class="selected-label">Выбрано:</span>
+          <span id="selectedFilmTitle" class="selected-title"></span>
+        </div>
+        <button
+          type="button"
+          id="copyLinkBtn"
+          class="copy-link-btn"
+          title="Копировать ссылку"
+          aria-label="Копировать ссылку на фильм"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path
+              fill="currentColor"
+              d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"
+            />
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="section actions">
+      <button id="replaceBtn" class="btn btn-primary" type="button" disabled>
+        Заменить на ReYohoho
+      </button>
+      <div class="youtube-action-row">
+        <button id="replaceYoutubeBtn" class="btn btn-youtube" type="button">
+          Заменить на YouTube
+        </button>
+        <button
+          type="button"
+          id="copyRoomLinkBtn"
+          class="copy-link-btn hidden"
+          title="Копировать ссылку"
+          aria-label="Копировать ссылку на комнату"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path
+              fill="currentColor"
+              d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"
+            />
+          </svg>
+        </button>
+      </div>
+      <button id="restoreBtn" class="btn btn-secondary hidden" type="button">
+        Вернуть Twitch
+      </button>
+    </div>
+
+    <p id="message" class="message"></p>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

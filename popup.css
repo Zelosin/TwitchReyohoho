@@ -1,0 +1,320 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  width: 320px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 13px;
+  color: #efeff1;
+  background: #18181b;
+}
+
+.popup {
+  padding: 14px;
+}
+
+.popup-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.logo {
+  font-weight: 700;
+  font-size: 15px;
+  color: #9147ff;
+}
+
+.badge {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #2f2f35;
+  color: #adadb8;
+}
+
+.badge.active {
+  background: #392e5c;
+  color: #bf94ff;
+}
+
+.section {
+  margin-bottom: 12px;
+}
+
+.search-section {
+  position: relative;
+}
+
+.label {
+  display: block;
+  margin-bottom: 6px;
+  color: #adadb8;
+  font-size: 12px;
+}
+
+input[type='text'] {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #3a3a3d;
+  border-radius: 6px;
+  background: #0e0e10;
+  color: #efeff1;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+input[type='text']:focus {
+  border-color: #9147ff;
+}
+
+.search-results {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 10;
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid #3a3a3d;
+  border-radius: 6px;
+  background: #0e0e10;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.search-results.hidden {
+  display: none;
+}
+
+.search-results::-webkit-scrollbar {
+  width: 6px;
+}
+
+.search-results::-webkit-scrollbar-thumb {
+  background: #53535f;
+  border-radius: 999px;
+}
+
+.result-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px;
+  border: none;
+  border-bottom: 1px solid #2a2a2d;
+  background: transparent;
+  color: #efeff1;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.result-item:last-child {
+  border-bottom: none;
+}
+
+.result-item:hover {
+  background: #1f1f23;
+}
+
+.result-item.selected {
+  background: #392e5c;
+}
+
+.result-poster {
+  width: 32px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 3px;
+  background: #2f2f35;
+  flex-shrink: 0;
+}
+
+.result-poster.placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  color: #71717a;
+}
+
+.result-info {
+  min-width: 0;
+}
+
+.result-title {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.result-meta {
+  font-size: 11px;
+  color: #adadb8;
+  margin-top: 2px;
+}
+
+.selected-film {
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #1f1f23;
+  border: 1px solid #392e5c;
+  font-size: 12px;
+}
+
+.selected-film-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.selected-film-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.selected-film.hidden {
+  display: none;
+}
+
+.selected-label {
+  color: #adadb8;
+  margin-right: 4px;
+}
+
+.selected-title {
+  color: #bf94ff;
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.copy-link-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid #53535f;
+  border-radius: 4px;
+  background: #2f2f35;
+  color: #bf94ff;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.copy-link-btn:hover {
+  background: #392e5c;
+  border-color: #9147ff;
+  color: #d4bfff;
+}
+
+.copy-link-btn.copied {
+  color: #53fc18;
+  border-color: #53fc18;
+}
+
+.actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.youtube-action-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.youtube-action-row .btn-youtube {
+  flex: 1;
+  min-width: 0;
+}
+
+.copy-link-btn.hidden {
+  display: none;
+}
+
+.btn-youtube {
+  background: #ff0000;
+  color: #fff;
+}
+
+.btn-youtube:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn-youtube:not(:disabled):hover {
+  opacity: 0.9;
+}
+
+.badge.youtube {
+  background: #4a1515;
+  color: #ff6b6b;
+}
+
+.btn {
+  flex: 1;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s, background 0.15s;
+}
+
+.btn-primary {
+  background: #9147ff;
+  color: #fff;
+}
+
+.btn-primary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn-secondary {
+  background: #3a3a3d;
+  color: #efeff1;
+}
+
+.btn.hidden {
+  display: none;
+}
+
+.btn:not(:disabled):hover {
+  opacity: 0.9;
+}
+
+.message {
+  min-height: 18px;
+  font-size: 12px;
+  color: #adadb8;
+  text-align: center;
+  padding: 6px 0 0;
+}
+
+.message.error {
+  color: #ff6b6b;
+}
+
+.message.success {
+  color: #53fc18;
+}
+
+.loading {
+  padding: 12px;
+  text-align: center;
+  color: #adadb8;
+  font-size: 12px;
+}

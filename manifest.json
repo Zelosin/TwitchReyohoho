@@ -1,0 +1,115 @@
+{
+
+  "manifest_version": 3,
+
+  "name": "Twitch ReYohoho",
+
+  "version": "1.5.41",
+
+  "description": "Замена плеера Twitch на плеер ReYohoho с поиском фильмов и подсветкой ссылок в чате",
+
+  "permissions": ["activeTab", "storage", "scripting", "webNavigation"],
+
+  "host_permissions": [
+
+    "https://www.twitch.tv/*",
+
+    "https://twitch.tv/*",
+
+    "https://reyohoho.com/*",
+
+    "https://www.reyohoho.com/*",
+
+    "https://sync.videoframe2.com/*",
+
+    "https://www.watchparty.me/*",
+
+    "https://watchparty.me/*",
+
+    "https://www.youtube.com/*",
+
+    "https://youtube.com/*"
+
+  ],
+
+  "action": {
+
+    "default_popup": "popup.html",
+
+    "default_icon": {
+
+      "16": "icons/icon16.png",
+
+      "48": "icons/icon48.png",
+
+      "128": "icons/icon128.png"
+
+    }
+
+  },
+
+  "background": {
+
+    "service_worker": "background.js"
+
+  },
+
+  "content_scripts": [
+
+    {
+
+      "matches": ["https://www.twitch.tv/*", "https://twitch.tv/*"],
+
+      "js": ["shadow-open.js"],
+
+      "run_at": "document_start",
+
+      "world": "MAIN"
+
+    },
+
+    {
+
+      "matches": ["https://www.twitch.tv/*", "https://twitch.tv/*"],
+
+      "js": ["extension-utils.js", "content.js"],
+
+      "css": ["content.css"],
+
+      "run_at": "document_idle"
+
+    },
+
+    {
+
+      "matches": [
+
+        "https://www.youtube.com/*",
+
+        "https://youtube.com/*"
+
+      ],
+
+      "js": ["extension-utils.js", "youtube-content.js"],
+
+      "css": ["youtube-content.css"],
+
+      "run_at": "document_idle"
+
+    }
+
+  ],
+
+  "icons": {
+
+    "16": "icons/icon16.png",
+
+    "48": "icons/icon48.png",
+
+    "128": "icons/icon128.png"
+
+  }
+
+}
+
+

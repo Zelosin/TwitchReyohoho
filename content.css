@@ -1,0 +1,257 @@
+.ryh-player-overlay {
+  position: absolute !important;
+  inset: 0 !important;
+  z-index: 999999 !important;
+  display: flex !important;
+  flex-direction: column;
+  background: #0e0e10;
+  pointer-events: auto;
+}
+
+.ryh-player-bar {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  width: 20%;
+  min-width: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 5px 8px;
+  background: rgba(24, 24, 27, 0.92);
+  border: 1px solid #3a3a3d;
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  transform: translateX(-50%) translateY(0);
+  opacity: 1;
+  transition: transform 0.22s ease, opacity 0.22s ease;
+  pointer-events: auto;
+}
+
+.ryh-player-overlay:not(.ryh-controls-visible) .ryh-player-bar {
+  transform: translateX(-50%) translateY(calc(-100% - 12px));
+  opacity: 0;
+  pointer-events: none;
+}
+
+.ryh-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.ryh-source-wrap {
+  position: relative;
+}
+
+.ryh-source-btn {
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid #53535f;
+  border-radius: 4px;
+  background: #2f2f35;
+  color: #efeff1;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.ryh-source-btn:hover,
+.ryh-source-btn[aria-expanded='true'] {
+  background: #392e5c;
+  border-color: #9147ff;
+}
+
+.ryh-source-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 140px;
+  padding: 4px;
+  border: 1px solid #3a3a3d;
+  border-radius: 6px;
+  background: #18181b;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  z-index: 1000000;
+}
+
+.ryh-source-menu.hidden {
+  display: none;
+}
+
+.ryh-source-option {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #efeff1;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ryh-source-option:hover,
+.ryh-source-option.active {
+  background: #392e5c;
+  color: #bf94ff;
+}
+
+.ryh-player-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: #efeff1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ryh-restore-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: #3a3a3d;
+  color: #efeff1;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.ryh-restore-btn span {
+  display: block;
+  line-height: 1;
+  transform: translateY(-0.5px);
+}
+
+.ryh-restore-btn:hover {
+  background: #53535f;
+}
+
+.ryh-wp-skip-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: #3a3a3d;
+  color: #efeff1;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.ryh-wp-skip-btn:hover {
+  background: #53535f;
+}
+
+.ryh-player-body {
+  flex: 1;
+  position: relative;
+  min-height: 0;
+  background: #000;
+}
+
+.ryh-player-frame {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: #000;
+}
+
+.ryh-player-frame.ryh-hidden {
+  display: none;
+}
+
+.ryh-youtube-overlay {
+  /* site: шапка + url + share-кнопки в левой колонке */
+  --ryh-wp-top-crop: 148px;
+  /* site: _rightColumn width 400px */
+  --ryh-wp-chat-width: 400px;
+  /* site: _expandButton_1n1hh_52 + gap справа */
+  --ryh-wp-right-trim: 55px;
+  /* site: _expandButton под ._controls_1injv_1 — скрыт обрезкой */
+  --ryh-wp-bottom-pad: 44px;
+  --ryh-wp-top-leak: 50px;
+  /* доп. подгонка слева (сдвиг iframe) */
+  --ryh-wp-left-trim: 15px;
+}
+
+.ryh-youtube-overlay .ryh-player-body {
+  background: #000;
+  overflow: hidden;
+}
+
+.ryh-watchparty-crop {
+  container-type: inline-size;
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.ryh-watchparty-stretch {
+  position: relative;
+  width: calc(100cqw - var(--ryh-wp-right-trim));
+  height: 100%;
+  overflow: hidden;
+  transform-origin: top left;
+  transform: scaleX(calc(100cqw / (100cqw - var(--ryh-wp-right-trim))));
+}
+
+.ryh-watchparty-frame {
+  position: absolute;
+  top: calc(-1 * (var(--ryh-wp-top-crop) + var(--ryh-wp-top-leak)) + var(--ryh-wp-bottom-pad));
+  left: calc(-1 * var(--ryh-wp-left-trim));
+  width: calc(100% + var(--ryh-wp-chat-width) + var(--ryh-wp-right-trim) + var(--ryh-wp-left-trim));
+  height: calc(100% + var(--ryh-wp-top-crop) + var(--ryh-wp-top-leak) - var(--ryh-wp-bottom-pad));
+  border: 0;
+  background: #000;
+}
+
+.ryh-youtube-overlay:not(.ryh-wp-controls-visible) .ryh-watchparty-frame {
+  pointer-events: none;
+}
+
+.ryh-chat-link {
+  display: inline;
+  padding: 0 2px;
+  border: none;
+  border-radius: 3px;
+  background: rgba(145, 71, 255, 0.2);
+  color: #bf94ff !important;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  pointer-events: auto;
+}
+
+.ryh-chat-link:hover {
+  background: rgba(145, 71, 255, 0.35);
+  color: #d4bfff !important;
+}
+
+.ryh-chat-link-loading {
+  opacity: 0.6;
+  pointer-events: none;
+}
