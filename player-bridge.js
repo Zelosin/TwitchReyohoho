@@ -5,11 +5,14 @@
 
   const TIMEUPDATE_DEBOUNCE_MS = 800;
   const SEEK_THRESHOLD = 1.5;
+  const TIME_POLL_MS = 450;
 
   let lastReportedTime = 0;
   let timeupdateTimer = null;
   let applyingRemote = false;
   let lastPlaybackEvent = '';
+  let lastPolledTime = 0;
+  let pollTimer = null;
 
   function postToParent(type, payload) {
     try {
@@ -26,23 +29,107 @@
     }
   }
 
+  function extractSeekTime(data) {
+    if (!data || typeof data !== 'object') {
+      return null;
+    }
+
+    if (data.type === 'playerEvent' && data.event === 'seek' && typeof data.time === 'number') {
+      return data.time;
+    }
+
+    const eventName = String(data.event || data.type || data.name || data.method || '').toLowerCase();
+    const isSeek =
+      eventName === 'seek' ||
+      eventName === 'seeked' ||
+      eventName === 'time' ||
+      eventName === 'timeupdate' ||
+      eventName === 'jump' ||
+      eventName === 'position' ||
+      eventName === 'scrub' ||
+      eventName === 'timechange';
+
+    if (!isSeek && data.type !== 'seek') {
+      return null;
+    }
+
+    const candidates = [
+      data.time,
+      data.currentTime,
+      data.position,
+      data.seconds,
+      data.value,
+      data?.data?.time,
+      data?.data?.currentTime,
+      data?.data?.position,
+      data?.data?.seconds
+    ];
+
+    for (const candidate of candidates) {
+      if (typeof candidate === 'number' && Number.isFinite(candidate)) {
+        return candidate;
+      }
+    }
+
+    return null;
+  }
+
+  function extractPlaybackEvent(data) {
+    if (!data || typeof data !== 'object') {
+      return null;
+    }
+
+    const eventName = String(data.event || data.type || data.name || data.method || '').toLowerCase();
+    if (eventName === 'play' || eventName === 'playing' || eventName === 'started' || eventName === 'start') {
+      return 'play';
+    }
+    if (eventName === 'pause' || eventName === 'paused') {
+      return 'pause';
+    }
+    return null;
+  }
+
+  function extractPlaybackTime(data) {
+    const candidates = [data?.time, data?.currentTime, data?.position, data?.data?.time];
+    for (const candidate of candidates) {
+      if (typeof candidate === 'number' && Number.isFinite(candidate)) {
+        return candidate;
+      }
+    }
+    return undefined;
+  }
+
+  function collectVideosFromRoot(root, videos) {
+    if (!root || !root.querySelectorAll) {
+      return;
+    }
+
+    root.querySelectorAll('video').forEach((video) => {
+      videos.push(video);
+    });
+
+    root.querySelectorAll('*').forEach((element) => {
+      if (element.shadowRoot) {
+        collectVideosFromRoot(element.shadowRoot, videos);
+      }
+    });
+  }
+
   function findVideos() {
-    const videos = [...document.querySelectorAll('video')];
-    const nested = [];
+    const videos = [];
+    collectVideosFromRoot(document, videos);
 
     document.querySelectorAll('iframe').forEach((iframe) => {
       try {
         if (iframe.contentDocument) {
-          iframe.contentDocument.querySelectorAll('video').forEach((video) => {
-            nested.push(video);
-          });
+          collectVideosFromRoot(iframe.contentDocument, videos);
         }
       } catch {
         /* cross-origin iframe */
       }
     });
 
-    return [...videos, ...nested];
+    return videos;
   }
 
   function getPrimaryVideo() {
@@ -106,6 +193,8 @@
     }
 
     applyingRemote = true;
+    lastReportedTime = target;
+    lastPolledTime = target;
 
     const videos = findVideos();
     let applied = false;
@@ -148,6 +237,8 @@
         }
       });
       postPlayerCommand('seek', time);
+      lastReportedTime = time;
+      lastPolledTime = time;
     }
 
     videos.forEach((video) => {
@@ -216,6 +307,7 @@
     }
 
     lastReportedTime = nextTime;
+    lastPolledTime = nextTime;
     postToParent('localSeek', { time: nextTime });
   }
 
@@ -228,6 +320,12 @@
 
     video.addEventListener('seeked', () => {
       reportSeek(video.currentTime);
+    });
+
+    video.addEventListener('seeking', () => {
+      if (!applyingRemote) {
+        reportSeek(video.currentTime);
+      }
     });
 
     video.addEventListener('play', () => {
@@ -249,9 +347,6 @@
 
       timeupdateTimer = setTimeout(() => {
         timeupdateTimer = null;
-        if (video.seeking) {
-          return;
-        }
         const drift = Math.abs(video.currentTime - lastReportedTime);
         if (drift >= SEEK_THRESHOLD) {
           reportSeek(video.currentTime);
@@ -264,20 +359,96 @@
     findVideos().forEach(bindVideo);
   }
 
+  function startTimePoll() {
+    if (pollTimer) {
+      return;
+    }
+
+    pollTimer = window.setInterval(() => {
+      if (applyingRemote) {
+        return;
+      }
+
+      const time = getCurrentTime();
+      if (time === null) {
+        return;
+      }
+
+      if (
+        Math.abs(time - lastPolledTime) >= SEEK_THRESHOLD &&
+        Math.abs(time - lastReportedTime) >= SEEK_THRESHOLD
+      ) {
+        reportSeek(time);
+      }
+
+      lastPolledTime = time;
+    }, TIME_POLL_MS);
+  }
+
+  function relayChildBridgeMessage(data) {
+    if (!data || data.source !== 'ryh-player-bridge') {
+      return false;
+    }
+
+    if (data.type === 'localSeek' && typeof data.time === 'number') {
+      postToParent('localSeek', { time: data.time });
+      return true;
+    }
+
+    if (data.type === 'localPlayback' && (data.event === 'play' || data.event === 'pause')) {
+      const payload = { event: data.event };
+      if (typeof data.time === 'number' && Number.isFinite(data.time)) {
+        payload.time = data.time;
+      }
+      postToParent('localPlayback', payload);
+      return true;
+    }
+
+    return false;
+  }
+
+  function relayPlayerEvent(data) {
+    if (!data || data.type !== 'playerEvent') {
+      return false;
+    }
+
+    if (data.event === 'seek' && typeof data.time === 'number') {
+      postToParent('localSeek', { time: data.time });
+      return true;
+    }
+
+    if (data.event === 'play' || data.event === 'pause') {
+      const payload = { event: data.event };
+      if (typeof data.time === 'number' && Number.isFinite(data.time)) {
+        payload.time = data.time;
+      }
+      postToParent('localPlayback', payload);
+      return true;
+    }
+
+    return false;
+  }
+
   function bindPostMessage() {
     window.addEventListener('message', (event) => {
       const data = event.data;
-      if (!data || data.type !== 'playerEvent') {
+      if (!data || data.source === 'ryh-player-sync-bridge') {
         return;
       }
 
-      if (data.event === 'seek' && typeof data.time === 'number') {
-        reportSeek(data.time);
+      if (relayChildBridgeMessage(data) || relayPlayerEvent(data)) {
         return;
       }
 
-      if (data.event === 'play' || data.event === 'pause') {
-        reportPlayback(data.event, data.time);
+      const seekTime = extractSeekTime(data);
+      if (seekTime !== null) {
+        reportSeek(seekTime);
+        return;
+      }
+
+      const playbackEvent = extractPlaybackEvent(data);
+      if (playbackEvent) {
+        reportPlayback(playbackEvent, extractPlaybackTime(data));
       }
     });
   }
@@ -313,6 +484,7 @@
   bindPostMessage();
   bindParentCommands();
   bindVideos();
+  startTimePoll();
 
   const observer = new MutationObserver(() => {
     bindVideos();

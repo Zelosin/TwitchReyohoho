@@ -34,7 +34,27 @@
 
     "https://www.youtube.com/*",
 
-    "https://youtube.com/*"
+    "https://youtube.com/*",
+
+    "https://api.variyt.ws/*",
+
+    "https://*.obrut.show/*",
+
+    "https://p.lumex.space/*",
+
+    "https://kinovibe.co/*",
+
+    "https://*.flixcdn.space/*",
+
+    "https://*.alloha.tv/*",
+
+    "https://*.voidboost.cc/*",
+
+    "https://*.videoframe2.com/*",
+
+    "https://*.kinobox.tv/*",
+
+    "https://*.hdrezka.me/*"
 
   ],
 

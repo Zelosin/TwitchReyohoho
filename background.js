@@ -828,20 +828,105 @@ async function ensurePlayerSyncApi(tabId) {
   });
 }
 
-async function getFilmPlayerFrameId(tabId) {
-  const frames = await chrome.webNavigation.getAllFrames({ tabId });
-  const filmFrames = frames.filter(
-    (frame) =>
-      frame.url &&
-      (/https:\/\/aprelteam\.gokino\.by\//i.test(frame.url) ||
-        /https:\/\/(?:www\.)?gokino\.by\/matrix\//i.test(frame.url))
-  );
+async function getOverlayEmbedSrc(tabId) {
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      const iframe = document
+        .getElementById('ryh-player-overlay')
+        ?.querySelector('.ryh-player-frame');
+      const src = iframe?.src || '';
+      return src && !src.startsWith('about:') ? src : '';
+    }
+  });
 
-  if (!filmFrames.length) {
-    return null;
+  return result?.result || '';
+}
+
+function collectDescendantFrameIds(frames, rootId) {
+  const ids = new Set([rootId]);
+  let growing = true;
+
+  while (growing) {
+    growing = false;
+    for (const frame of frames) {
+      if (ids.has(frame.parentFrameId) && !ids.has(frame.frameId)) {
+        ids.add(frame.frameId);
+        growing = true;
+      }
+    }
   }
 
-  return filmFrames[filmFrames.length - 1].frameId;
+  return [...ids];
+}
+
+async function getOverlayPlayerFrameIds(tabId) {
+  const embedSrc = await getOverlayEmbedSrc(tabId);
+  const frames = await chrome.webNavigation.getAllFrames({ tabId });
+  const roots = [];
+
+  if (embedSrc) {
+    let embedOrigin = '';
+    try {
+      embedOrigin = new URL(embedSrc).origin;
+    } catch {
+      embedOrigin = '';
+    }
+
+    for (const frame of frames) {
+      if (!frame.url || frame.url === 'about:blank') {
+        continue;
+      }
+
+      if (frame.url === embedSrc || (embedOrigin && frame.url.startsWith(embedOrigin))) {
+        roots.push(frame.frameId);
+      }
+    }
+  }
+
+  if (!roots.length) {
+    for (const frame of frames) {
+      if (
+        frame.url &&
+        (/https:\/\/aprelteam\.gokino\.by\//i.test(frame.url) ||
+          /https:\/\/(?:www\.)?gokino\.by\/matrix\//i.test(frame.url))
+      ) {
+        roots.push(frame.frameId);
+      }
+    }
+  }
+
+  if (!roots.length) {
+    return [];
+  }
+
+  const allIds = new Set();
+  for (const rootId of roots) {
+    collectDescendantFrameIds(frames, rootId).forEach((id) => allIds.add(id));
+  }
+
+  return [...allIds];
+}
+
+async function getFilmPlayerFrameId(tabId) {
+  const frameIds = await getOverlayPlayerFrameIds(tabId);
+  return frameIds.length ? frameIds[frameIds.length - 1] : null;
+}
+
+async function ensurePlayerBridgesInTab(tabId) {
+  const frameIds = await getOverlayPlayerFrameIds(tabId);
+  let injected = 0;
+
+  for (const frameId of frameIds) {
+    try {
+      await ensurePlayerBridge(tabId, frameId);
+      injected += 1;
+    } catch {
+      /* нет прав на домен или фрейм исчез */
+    }
+  }
+
+  return { ok: true, injected, total: frameIds.length };
 }
 
 async function ensurePlayerBridge(tabId, frameId) {
@@ -873,7 +958,8 @@ async function callPlayerSync(tabId, method, args = {}) {
         return api.connect({
           roomId: syncArgs.roomId,
           username: syncArgs.username || syncArgs.clientId,
-          wsOrigin: syncWsOrigin
+          wsOrigin: syncWsOrigin,
+          force: Boolean(syncArgs.force)
         });
       }
 
@@ -909,16 +995,15 @@ async function callPlayerSync(tabId, method, args = {}) {
   return result?.result || { ok: false, error: 'Нет ответа от модуля синхронизации' };
 }
 
-async function joinPlayerSyncInTab(tabId, { service, filmId }) {
+async function joinPlayerSyncInTab(tabId, { service, filmId, force = false } = {}) {
   const roomId = buildSyncRoomId(service, filmId);
   if (!roomId) {
     throw new Error('Не удалось сформировать комнату синхронизации');
   }
 
   for (let attempt = 0; attempt < 24; attempt += 1) {
-    const frameId = await getFilmPlayerFrameId(tabId);
-    if (frameId !== null) {
-      await ensurePlayerBridge(tabId, frameId);
+    const bridgeResult = await ensurePlayerBridgesInTab(tabId);
+    if (bridgeResult.injected > 0) {
       break;
     }
     if (attempt < 23) {
@@ -930,13 +1015,20 @@ async function joinPlayerSyncInTab(tabId, { service, filmId }) {
   const result = await callPlayerSync(tabId, 'connect', {
     roomId,
     username: `ryh_${clientId.slice(0, 8)}`,
-    clientId
+    clientId,
+    force: Boolean(force)
   });
   if (!result.ok) {
     throw new Error(result.error || 'Не удалось подключиться к синхронизации');
   }
 
   return { ok: true, roomId, clientId, connected: true };
+}
+
+async function rejoinPlayerSyncInTab(tabId, { service, filmId }) {
+  await leavePlayerSyncInTab(tabId);
+  await sleepMs(350);
+  return joinPlayerSyncInTab(tabId, { service, filmId, force: true });
 }
 
 async function leavePlayerSyncInTab(tabId) {
@@ -953,8 +1045,8 @@ async function playerSyncSeekDeltaInTab(tabId, delta) {
   await callPlayerSync(tabId, 'broadcastSeekDelta', { delta: Number(delta) });
   await sleepMs(180);
 
-  const frameId = await getFilmPlayerFrameId(tabId);
-  if (frameId !== null) {
+  const frameIds = await getOverlayPlayerFrameIds(tabId);
+  for (const frameId of frameIds) {
     const [timeResult] = await chrome.scripting.executeScript({
       target: { tabId, frameIds: [frameId] },
       world: 'MAIN',
@@ -1550,6 +1642,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === 'ensurePlayerBridgeInTab') {
+    const tabId = message.tabId || sender.tab?.id;
+    if (!tabId) {
+      sendResponse({ ok: false, error: 'Вкладка не найдена' });
+      return false;
+    }
+
+    ensurePlayerBridgesInTab(tabId)
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
   if (message.type === 'joinPlayerSync') {
     const tabId = message.tabId || sender.tab?.id;
     if (!tabId) {
@@ -1558,6 +1663,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     joinPlayerSyncInTab(tabId, {
+      service: message.service,
+      filmId: message.filmId
+    })
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === 'rejoinPlayerSync') {
+    const tabId = message.tabId || sender.tab?.id;
+    if (!tabId) {
+      sendResponse({ ok: false, error: 'Вкладка не найдена' });
+      return false;
+    }
+
+    rejoinPlayerSyncInTab(tabId, {
       service: message.service,
       filmId: message.filmId
     })

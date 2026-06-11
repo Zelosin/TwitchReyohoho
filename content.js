@@ -213,6 +213,10 @@
   }
 
   function scheduleSyncBridgeJoin() {
+    schedulePlayerSyncResync();
+  }
+
+  function schedulePlayerSyncResync() {
     if (!playerState.syncEnabled || !isSyncSupportedMode(playerState.mode)) {
       return;
     }
@@ -223,8 +227,8 @@
 
     syncBridgeTimer = setTimeout(() => {
       syncBridgeTimer = null;
-      joinPlayerSync().catch(() => {});
-    }, 1200);
+      rejoinPlayerSync().catch(() => {});
+    }, 1500);
   }
 
   async function joinPlayerSync() {
@@ -234,6 +238,21 @@
 
     return sendRuntimeMessage({
       type: 'joinPlayerSync',
+      service: playerState.mode,
+      filmId: playerState.filmId
+    }).catch(() => ({ ok: false }));
+  }
+
+  async function rejoinPlayerSync() {
+    if (!playerState.syncEnabled || !isSyncSupportedMode(playerState.mode) || !playerState.filmId) {
+      return { ok: false };
+    }
+
+    playerState.syncViewerCount = 0;
+    updateSyncUi();
+
+    return sendRuntimeMessage({
+      type: 'rejoinPlayerSync',
       service: playerState.mode,
       filmId: playerState.filmId
     }).catch(() => ({ ok: false }));
@@ -262,7 +281,6 @@
     updateSyncUi();
 
     if (next) {
-      scheduleSyncBridgeJoin();
       await joinPlayerSync();
     } else {
       await leavePlayerSync();
@@ -611,7 +629,7 @@
         if (loadGeneration !== playerSourceLoadGeneration) {
           return;
         }
-        scheduleSyncBridgeJoin();
+        schedulePlayerSyncResync();
       };
     }
   }

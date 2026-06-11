@@ -171,6 +171,51 @@
     }
   }
 
+  function extractSeekTimeFromPayload(data) {
+    if (!data || typeof data !== 'object') {
+      return null;
+    }
+
+    if (data.source === 'ryh-player-bridge' || data.source === 'ryh-player-sync') {
+      return null;
+    }
+
+    if (data.type === 'playerEvent' && data.event === 'seek' && typeof data.time === 'number') {
+      return data.time;
+    }
+
+    const eventName = String(data.event || data.type || data.name || data.method || '').toLowerCase();
+    const isSeek =
+      eventName === 'seek' ||
+      eventName === 'seeked' ||
+      eventName === 'jump' ||
+      eventName === 'position' ||
+      eventName === 'scrub' ||
+      data.type === 'seek';
+
+    if (!isSeek) {
+      return null;
+    }
+
+    const candidates = [
+      data.time,
+      data.currentTime,
+      data.position,
+      data.seconds,
+      data.value,
+      data?.data?.time,
+      data?.data?.seconds
+    ];
+
+    for (const candidate of candidates) {
+      if (typeof candidate === 'number' && Number.isFinite(candidate)) {
+        return candidate;
+      }
+    }
+
+    return null;
+  }
+
   function handlePlayerEventFromFrame(data) {
     if (applyingRemoteSeek || applyingRemotePlayback) {
       return;
@@ -286,10 +331,11 @@
       return { ok: false, error: 'roomId and username required' };
     }
 
+    const forceReconnect = Boolean(options?.force);
     const roomChanged = Boolean(roomId && nextRoomId !== roomId);
     const usernameChanged = Boolean(username && nextUsername !== username);
 
-    if (roomChanged || usernameChanged || wsOrigin !== nextWsOrigin) {
+    if (forceReconnect || roomChanged || usernameChanged || wsOrigin !== nextWsOrigin) {
       if (ws) {
         intentionalClose = true;
         try {
@@ -385,13 +431,19 @@
         return;
       }
 
-      const iframe = getOverlayFrame();
-      if (!iframe?.contentWindow || event.source !== iframe.contentWindow) {
+      const overlayFrame = getOverlayFrame();
+      if (!overlayFrame?.contentWindow || event.source !== overlayFrame.contentWindow) {
         return;
       }
 
       if (data.type === 'playerEvent') {
         handlePlayerEventFromFrame(data);
+        return;
+      }
+
+      const seekTime = extractSeekTimeFromPayload(data);
+      if (seekTime !== null) {
+        broadcastSeek(seekTime);
       }
     });
   }
