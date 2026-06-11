@@ -4,7 +4,7 @@
 
   "name": "Twitch ReYohoho",
 
-  "version": "1.5.41",
+  "version": "1.5.45",
 
   "description": "Замена плеера Twitch на плеер ReYohoho с поиском фильмов и подсветкой ссылок в чате",
 
@@ -19,6 +19,12 @@
     "https://reyohoho.com/*",
 
     "https://www.reyohoho.com/*",
+
+    "https://aprelteam.gokino.by/*",
+
+    "https://gokino.by/*",
+
+    "https://www.gokino.by/*",
 
     "https://sync.videoframe2.com/*",
 

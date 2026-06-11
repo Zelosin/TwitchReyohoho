@@ -9,12 +9,21 @@
 <body>
   <div class="popup">
     <header class="popup-header">
-      <span class="logo">ReYohoho</span>
+      <span class="logo aprel" id="logoText">Aprel</span>
       <span class="badge" id="statusBadge">Twitch</span>
     </header>
 
+    <div class="section service-section">
+      <label class="label">Источник видео</label>
+      <div class="service-toggle" role="group" aria-label="Источник видео">
+        <button type="button" id="serviceReyohoho" class="service-btn">ReYohoho</button>
+        <button type="button" id="serviceAprel" class="service-btn active">Aprel</button>
+        <button type="button" id="serviceMatrix" class="service-btn">Matrix</button>
+      </div>
+    </div>
+
     <div class="section search-section">
-      <label class="label" for="searchInput">Поиск фильма</label>
+      <label class="label" for="searchInput" id="searchLabel">Поиск фильма</label>
       <input
         id="searchInput"
         type="text"
@@ -49,7 +58,7 @@
 
     <div class="section actions">
       <button id="replaceBtn" class="btn btn-primary" type="button" disabled>
-        Заменить на ReYohoho
+        Заменить на Aprel
       </button>
       <div class="youtube-action-row">
         <button id="replaceYoutubeBtn" class="btn btn-youtube" type="button">

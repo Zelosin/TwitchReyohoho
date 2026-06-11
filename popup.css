@@ -46,6 +46,65 @@ body {
   margin-bottom: 12px;
 }
 
+.service-toggle {
+  display: flex;
+  gap: 6px;
+}
+
+.service-btn {
+  flex: 1;
+  padding: 7px 6px;
+  border: 1px solid #3a3a3d;
+  border-radius: 6px;
+  background: #0e0e10;
+  color: #adadb8;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.service-btn:hover {
+  border-color: #53535f;
+  color: #efeff1;
+}
+
+.service-btn.active {
+  background: #392e5c;
+  border-color: #9147ff;
+  color: #bf94ff;
+}
+
+.service-btn.active.aprel {
+  background: #1a3a2a;
+  border-color: #1abc9c;
+  color: #1abc9c;
+}
+
+.service-btn.active.matrix {
+  background: #12301a;
+  border-color: #00ff41;
+  color: #00ff41;
+}
+
+.badge.aprel {
+  background: #1a3a2a;
+  color: #1abc9c;
+}
+
+.badge.matrix {
+  background: #12301a;
+  color: #00ff41;
+}
+
+.logo.aprel {
+  color: #1abc9c;
+}
+
+.logo.matrix {
+  color: #00ff41;
+}
+
 .search-section {
   position: relative;
 }

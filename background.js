@@ -2,6 +2,8 @@ importScripts('socket.io.min.js', 'watchparty.js');
 
 const REYOHOHO_ORIGIN = 'https://reyohoho.com';
 const REYOHOHO_ORIGINS = ['https://reyohoho.com', 'https://www.reyohoho.com'];
+const APREL_ORIGIN = 'https://aprelteam.gokino.by';
+const MATRIX_ORIGIN = 'https://gokino.by';
 
 const FETCH_HEADERS = {
   Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -146,6 +148,302 @@ async function fetchReyohohoHtml(path) {
   }
 
   throw lastError || new Error('Не удалось загрузить reyohoho.com');
+}
+
+async function getVideoService() {
+  const stored = await chrome.storage.local.get(['videoService']);
+  if (stored.videoService === 'reyohoho') {
+    return 'reyohoho';
+  }
+  if (stored.videoService === 'matrix') {
+    return 'matrix';
+  }
+  return 'aprel';
+}
+
+function resolveVideoService(filmId, service) {
+  if (service === 'aprel' || service === 'reyohoho' || service === 'matrix') {
+    return service;
+  }
+
+  const id = String(filmId ?? '');
+  if (id.includes('/')) {
+    return 'aprel';
+  }
+
+  return null;
+}
+
+function normalizeKinopoiskId(filmId) {
+  const raw = String(filmId || '')
+    .trim()
+    .replace(/^https?:\/\/(?:www\.)?gokino\.by\/matrix\/search\.php\?(?:[^#]*&)?q=/i, '')
+    .replace(/[^\d].*$/, '');
+
+  if (!/^\d{3,}$/.test(raw)) {
+    throw new Error('Некорректный ID Кинопоиска');
+  }
+
+  return raw;
+}
+
+function matrixPageUrlFromKpId(kpId) {
+  return `${MATRIX_ORIGIN}/matrix/search.php?q=${kpId}`;
+}
+
+async function fetchMatrixHtml(path) {
+  try {
+    const response = await fetch(`${MATRIX_ORIGIN}${path}`, {
+      method: 'GET',
+      headers: FETCH_HEADERS,
+      redirect: 'follow',
+      credentials: 'omit',
+      cache: 'no-store'
+    });
+
+    if (!response.ok) {
+      throw new Error(`Ошибка запроса: ${response.status}`);
+    }
+
+    return response.text();
+  } catch (error) {
+    if (error?.message === 'Failed to fetch') {
+      throw new Error(
+        'Не удалось подключиться к gokino.by. Проверьте интернет и обновите расширение.'
+      );
+    }
+    throw error;
+  }
+}
+
+function resolveMatrixPlayerUrl(url, pageUrl) {
+  let resolved = decodeHtmlEntities(String(url || '').trim());
+  if (!resolved) {
+    return '';
+  }
+
+  if (resolved.startsWith('//')) {
+    resolved = `https:${resolved}`;
+  } else if (resolved.startsWith('/')) {
+    resolved = `${MATRIX_ORIGIN}${resolved}`;
+  }
+
+  return resolved;
+}
+
+function buildMatrixFallbackPlayers(kpId, pageUrl) {
+  return [
+    {
+      id: 'player-1',
+      name: 'Плеер 1',
+      type: 'iframe',
+      url: `https://api.variyt.ws/embed/kp/${kpId}`
+    },
+    {
+      id: 'player-2',
+      name: 'Плеер 2',
+      type: 'iframe',
+      url: `https://a7c5ea7c.obrut.show/embed/1EjM/kinopoisk/${kpId}`
+    },
+    {
+      id: 'player-3',
+      name: 'Плеер 3',
+      type: 'iframe',
+      url: `https://p.lumex.space/aoeIJGBZSi3y?kp_id=${kpId}`
+    },
+    {
+      id: 'player-9',
+      name: 'Плеер 9',
+      type: 'iframe',
+      url: `https://kinovibe.co/embed/kinopoisk/${kpId}/`
+    },
+    {
+      id: 'player-12',
+      name: 'Плеер 12',
+      type: 'iframe',
+      url: `https://player0.flixcdn.space/show/kinopoisk/${kpId}`
+    },
+    {
+      id: 'page',
+      name: 'Matrix',
+      type: 'iframe',
+      url: pageUrl
+    }
+  ];
+}
+
+function parseMatrixPlayers(html, kpId, pageUrl) {
+  const players = [];
+  const seen = new Set();
+
+  const addPlayer = (url, name, idHint = '') => {
+    const resolved = resolveMatrixPlayerUrl(url, pageUrl);
+    if (!resolved || seen.has(resolved)) {
+      return;
+    }
+
+    seen.add(resolved);
+    players.push({
+      id: idHint || `player-${players.length + 1}`,
+      name: name || `Плеер ${players.length + 1}`,
+      type: 'iframe',
+      url: resolved
+    });
+  };
+
+  const selectBlocks = html.match(/<select[^>]*>[\s\S]*?<\/select>/gi) || [];
+  for (const block of selectBlocks) {
+    const optionPattern = /<option[^>]*value="([^"]+)"[^>]*>([\s\S]*?)<\/option>/gi;
+    let optionMatch;
+    while ((optionMatch = optionPattern.exec(block)) !== null) {
+      const label = decodeHtmlEntities(optionMatch[2].replace(/<[^>]+>/g, '').trim());
+      if (!label || /выбор/i.test(label)) {
+        continue;
+      }
+      addPlayer(optionMatch[1], label);
+    }
+  }
+
+  const buttonPattern =
+    /<(button|a)[^>]*(?:data-(?:src|url|link|player)=("|')([^"']+)\2|onclick="([^"]+)")[^>]*>([\s\S]*?)<\/\1>/gi;
+  let buttonMatch;
+  while ((buttonMatch = buttonPattern.exec(html)) !== null) {
+    const label = decodeHtmlEntities(buttonMatch[5].replace(/<[^>]+>/g, '').trim());
+    if (!/плеер/i.test(label)) {
+      continue;
+    }
+
+    const dataUrl = buttonMatch[3];
+    const onclick = buttonMatch[4] || '';
+    const onclickUrl =
+      onclick.match(/(?:src|url)\s*=\s*['"]([^'"]+)['"]/i)?.[1] ||
+      onclick.match(/(['"])(https?:\/\/[^'"]+)\1/i)?.[2] ||
+      onclick.match(/(['"])(\/[^'"]+)\1/i)?.[2];
+
+    addPlayer(dataUrl || onclickUrl, label);
+  }
+
+  const iframePattern = /<iframe[^>]+(?:data-src|src)="([^"]+)"/gi;
+  let iframeMatch;
+  while ((iframeMatch = iframePattern.exec(html)) !== null) {
+    const url = iframeMatch[1];
+    if (/about:blank|^$/i.test(url)) {
+      continue;
+    }
+    addPlayer(url, `Плеер ${players.length + 1}`);
+  }
+
+  const kpUrlPattern = new RegExp(
+    `(https?:\\/\\/[^"'\\s<>]+(?:kinopoisk|(?:\\/|\\?|&)kp(?:_id)?=?)${kpId}[^"'\\s<>]*)`,
+    'gi'
+  );
+  let kpUrlMatch;
+  while ((kpUrlMatch = kpUrlPattern.exec(html)) !== null) {
+    addPlayer(kpUrlMatch[1], `Плеер ${players.length + 1}`);
+  }
+
+  if (!players.length) {
+    return buildMatrixFallbackPlayers(kpId, pageUrl);
+  }
+
+  if (!players.some((player) => player.url === pageUrl)) {
+    players.push({
+      id: 'page',
+      name: 'Matrix',
+      type: 'iframe',
+      url: pageUrl
+    });
+  }
+
+  return players;
+}
+
+async function getMatrixPlayerEmbed(filmId) {
+  const kpId = normalizeKinopoiskId(filmId);
+  const pageUrl = matrixPageUrlFromKpId(kpId);
+  const html = await fetchMatrixHtml(`/matrix/search.php?q=${kpId}`);
+  const titleMatch =
+    html.match(/Фильм по ID\s*(\d+)/i) ||
+    html.match(/<h1[^>]*>([^<]*ID[^<]*\d+[^<]*)<\/h1>/i) ||
+    html.match(/<title>([^<]+)<\/title>/);
+  const title = titleMatch
+    ? decodeHtmlEntities(titleMatch[1].trim())
+    : `Кинопоиск #${kpId}`;
+  const players = parseMatrixPlayers(html, kpId, pageUrl);
+  const defaultPlayer = players[0];
+
+  return {
+    filmId: kpId,
+    title,
+    pageUrl,
+    players,
+    activePlayerId: defaultPlayer.id,
+    embedUrl: defaultPlayer.url,
+    service: 'matrix'
+  };
+}
+
+async function fetchAprelHtml(path) {
+  try {
+    const response = await fetch(`${APREL_ORIGIN}${path}`, {
+      method: 'GET',
+      headers: FETCH_HEADERS,
+      redirect: 'follow',
+      credentials: 'omit',
+      cache: 'no-store'
+    });
+
+    if (!response.ok) {
+      throw new Error(`Ошибка запроса: ${response.status}`);
+    }
+
+    return response.text();
+  } catch (error) {
+    if (error?.message === 'Failed to fetch') {
+      throw new Error(
+        'Не удалось подключиться к aprelteam.gokino.by. Проверьте интернет и обновите расширение.'
+      );
+    }
+    throw error;
+  }
+}
+
+function normalizeAprelPath(filmId) {
+  const raw = String(filmId || '')
+    .trim()
+    .replace(/^https?:\/\/(?:www\.)?aprelteam\.gokino\.by\//i, '')
+    .replace(/^\//, '')
+    .replace(/\.html$/i, '');
+
+  if (!raw) {
+    throw new Error('Некорректная ссылка Aprel Kino');
+  }
+
+  return raw;
+}
+
+function aprelPageUrlFromPath(filmPath) {
+  return `${APREL_ORIGIN}/${filmPath}.html`;
+}
+
+function aprelPathFromUrl(url) {
+  const match = String(url || '').match(/aprelteam\.gokino\.by\/(.+?)\.html/i);
+  return match ? match[1] : null;
+}
+
+function resolveAprelPlayerUrl(url, pageUrl) {
+  let resolved = decodeHtmlEntities(String(url || '').trim());
+  if (!resolved) {
+    return '';
+  }
+
+  if (resolved.startsWith('//')) {
+    resolved = `https:${resolved}`;
+  } else if (resolved.startsWith('/')) {
+    resolved = `${APREL_ORIGIN}${resolved}`;
+  }
+
+  return resolved;
 }
 
 async function getWatchPartyFrameId(tabId) {
@@ -649,7 +947,147 @@ function resolvePlayerUrl(player, filmId, pageUrl) {
   return pageUrl || `${REYOHOHO_ORIGIN}/films/${filmId}`;
 }
 
-async function searchMovies(query) {
+function normalizeAprelPosterUrl(url) {
+  let resolved = decodeHtmlEntities(String(url || '').trim());
+  if (!resolved || /\/uploads\/posts\/watermark\.jpg/i.test(resolved)) {
+    return '';
+  }
+
+  if (resolved.startsWith('//')) {
+    resolved = `https:${resolved}`;
+  } else if (resolved.startsWith('/')) {
+    resolved = `${APREL_ORIGIN}${resolved}`;
+  }
+
+  return resolved;
+}
+
+function parseAprelSearchResults(html) {
+  const movies = [];
+  const seen = new Set();
+  const cardPattern = /<article class="scard">([\s\S]*?)<\/article>/gi;
+
+  let cardMatch;
+  while ((cardMatch = cardPattern.exec(html)) !== null) {
+    const block = cardMatch[1];
+    const titleMatch = block.match(/data-copy="title"\s+data-title="([^"]+)"/);
+    const linkMatch = block.match(
+      /data-copy="link"\s+data-link="(https:\/\/aprelteam\.gokino\.by\/[^"]+)"/
+    );
+
+    if (!titleMatch || !linkMatch) {
+      continue;
+    }
+
+    const titleRaw = decodeHtmlEntities(titleMatch[1].trim());
+    const pageUrl = linkMatch[1];
+    const path = aprelPathFromUrl(pageUrl);
+    if (!path || seen.has(path)) {
+      continue;
+    }
+
+    seen.add(path);
+
+    const posterMatch =
+      block.match(/class="scard__img[^"]*"[\s\S]*?<img[^>]+src="([^"]+)"/i) ||
+      block.match(/class="scard__poster"[\s\S]*?<img[^>]+src="([^"]+)"/i);
+    const posterUrl = posterMatch ? normalizeAprelPosterUrl(posterMatch[1]) : '';
+
+    const yearMatch = titleRaw.match(/\((\d{4})\)\s*$/);
+    movies.push({
+      id: path,
+      name: yearMatch ? titleRaw.replace(/\s*\(\d{4}\)\s*$/, '').trim() : titleRaw,
+      year: yearMatch ? Number(yearMatch[1]) : 0,
+      posterUrl,
+      kp: '-',
+      imdb: '-'
+    });
+  }
+
+  return movies;
+}
+
+function parseAprelPlayers(html, pageUrl) {
+  const players = [];
+  const selectMatch = html.match(/<select id="player-select"[\s\S]*?<\/select>/i);
+
+  if (selectMatch) {
+    const optionPattern = /<option value="([^"]*)">([\s\S]*?)<\/option>/gi;
+    let optionMatch;
+    let index = 0;
+
+    while ((optionMatch = optionPattern.exec(selectMatch[0])) !== null) {
+      const url = resolveAprelPlayerUrl(optionMatch[1], pageUrl);
+      const name = decodeHtmlEntities(optionMatch[2].replace(/<[^>]+>/g, '').trim());
+      if (!url) {
+        continue;
+      }
+
+      index += 1;
+      players.push({
+        id: `player-${index}`,
+        name: name || `Плеер ${index}`,
+        type: 'iframe',
+        url
+      });
+    }
+  }
+
+  if (!players.length) {
+    const iframeMatch = html.match(/<iframe id="film_main"[^>]*data-src="([^"]+)"/i);
+    if (iframeMatch) {
+      const url = resolveAprelPlayerUrl(iframeMatch[1], pageUrl);
+      if (url) {
+        players.push({
+          id: 'default',
+          name: 'Aprel',
+          type: 'iframe',
+          url
+        });
+      }
+    }
+  }
+
+  if (!players.length) {
+    players.push({
+      id: 'page',
+      name: 'Aprel Kino',
+      type: 'iframe',
+      url: pageUrl
+    });
+  }
+
+  return players;
+}
+
+async function searchAprelMovies(query) {
+  const path = `/?do=search&mode=advanced&subaction=search&story=${encodeURIComponent(query.trim())}`;
+  const html = await fetchAprelHtml(path);
+  return parseAprelSearchResults(html);
+}
+
+async function getAprelPlayerEmbed(filmId) {
+  const filmPath = normalizeAprelPath(filmId);
+  const pagePath = `/${filmPath}.html`;
+  const html = await fetchAprelHtml(pagePath);
+  const pageUrl = aprelPageUrlFromPath(filmPath);
+  const titleMatch = html.match(/<title>([^<]+)<\/title>/);
+  const title = titleMatch ? decodeHtmlEntities(titleMatch[1].trim()) : `Фильм ${filmPath}`;
+  const players = parseAprelPlayers(html, pageUrl);
+  const defaultPlayer = players[0];
+
+  return {
+    filmId: filmPath,
+    title,
+    pageUrl,
+    players,
+    activePlayerId: defaultPlayer.id,
+    embedUrl: defaultPlayer.url,
+    service: 'aprel'
+  };
+}
+
+async function searchReyohohoMovies(query) {
   const path = `/?q=${encodeURIComponent(query.trim())}`;
   const html = await fetchReyohohoHtml(path);
   let raw = parseInitialMoviesData(html);
@@ -661,7 +1099,7 @@ async function searchMovies(query) {
   return raw.map(mapMovie);
 }
 
-async function getPlayerEmbed(filmId) {
+async function getReyohohoPlayerEmbed(filmId) {
   const path = `/films/${filmId}`;
   const html = await fetchReyohohoHtml(path);
   const url = `${REYOHOHO_ORIGIN}/films/${filmId}`;
@@ -688,16 +1126,42 @@ async function getPlayerEmbed(filmId) {
   };
 }
 
+async function searchMovies(query, service) {
+  const resolvedService = service || (await getVideoService());
+  if (resolvedService === 'matrix') {
+    return [];
+  }
+  if (resolvedService === 'aprel') {
+    return searchAprelMovies(query);
+  }
+  return searchReyohohoMovies(query);
+}
+
+async function getPlayerEmbed(filmId, service) {
+  const resolvedService =
+    resolveVideoService(filmId, service) || (await getVideoService());
+
+  if (resolvedService === 'aprel') {
+    return getAprelPlayerEmbed(filmId);
+  }
+
+  if (resolvedService === 'matrix') {
+    return getMatrixPlayerEmbed(filmId);
+  }
+
+  return getReyohohoPlayerEmbed(filmId);
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'searchMovies') {
-    searchMovies(message.query)
+    searchMovies(message.query, message.service)
       .then((results) => sendResponse({ ok: true, results }))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   }
 
   if (message.type === 'getPlayerEmbed') {
-    getPlayerEmbed(message.filmId)
+    getPlayerEmbed(message.filmId, message.service)
       .then((data) => sendResponse({ ok: true, data }))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;

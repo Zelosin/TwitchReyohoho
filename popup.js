@@ -9,8 +9,18 @@ const replaceYoutubeBtn = document.getElementById('replaceYoutubeBtn');
 const restoreBtn = document.getElementById('restoreBtn');
 const statusBadge = document.getElementById('statusBadge');
 const messageEl = document.getElementById('message');
+const logoText = document.getElementById('logoText');
+const serviceReyohohoBtn = document.getElementById('serviceReyohoho');
+const serviceAprelBtn = document.getElementById('serviceAprel');
+const serviceMatrixBtn = document.getElementById('serviceMatrix');
+const searchLabel = document.getElementById('searchLabel');
 
 const SEARCH_DELAY_MS = 500;
+const SERVICE_LABELS = {
+  reyohoho: 'ReYohoho',
+  aprel: 'Aprel',
+  matrix: 'Matrix'
+};
 
 let searchTimer = null;
 let searchRequestId = 0;
@@ -18,6 +28,7 @@ let selectedFilm = null;
 let lastSearchResults = [];
 let activePlayerFilmId = null;
 let activeYoutubeSlug = null;
+let videoService = 'reyohoho';
 
 function showMessage(text, type = '') {
   messageEl.textContent = text || '';
@@ -30,13 +41,49 @@ function escapeHtml(text) {
   return el.innerHTML;
 }
 
-function setReyohohoActive(active) {
-  statusBadge.textContent = active ? 'ReYohoho' : 'Twitch';
-  statusBadge.className = `badge${active ? ' active' : ''}`;
+function getServiceLabel(service = videoService) {
+  return SERVICE_LABELS[service] || SERVICE_LABELS.reyohoho;
+}
+
+function updateServiceUi() {
+  const isAprel = videoService === 'aprel';
+  const isMatrix = videoService === 'matrix';
+  serviceReyohohoBtn.classList.toggle('active', videoService === 'reyohoho');
+  serviceAprelBtn.classList.toggle('active', isAprel);
+  serviceAprelBtn.classList.toggle('aprel', isAprel);
+  serviceMatrixBtn.classList.toggle('active', isMatrix);
+  serviceMatrixBtn.classList.toggle('matrix', isMatrix);
+  logoText.textContent = getServiceLabel();
+  logoText.classList.toggle('aprel', isAprel);
+  logoText.classList.toggle('matrix', isMatrix);
+  searchLabel.textContent = isMatrix ? 'ID Кинопоиска' : 'Поиск фильма';
+  searchInput.placeholder = isMatrix ? 'Например: 46959' : 'Название фильма...';
+  updateReplaceButton();
+}
+
+async function setVideoService(service) {
+  videoService =
+    service === 'matrix' ? 'matrix' : service === 'reyohoho' ? 'reyohoho' : 'aprel';
+  await chrome.storage.local.set({ videoService });
+  updateServiceUi();
+  clearSelection();
+  searchResults.classList.add('hidden');
+  searchResults.innerHTML = '';
+  showMessage('');
+}
+
+function setFilmActive(active, service = videoService) {
+  const label = getServiceLabel(service);
+  statusBadge.textContent = active ? label : 'Twitch';
+  statusBadge.className = `badge${active ? ' active' : ''}${active && service === 'aprel' ? ' aprel' : ''}${active && service === 'matrix' ? ' matrix' : ''}`;
   restoreBtn.classList.toggle('hidden', !active);
   if (active) {
     clearYoutubeRoomSelection();
   }
+}
+
+function setReyohohoActive(active) {
+  setFilmActive(active, 'reyohoho');
 }
 
 function setYoutubeActive(active, roomUrl = '', roomId = '') {
@@ -57,12 +104,15 @@ function applyFilmFromPlayerState(state) {
   }
 
   activePlayerFilmId = state.filmId;
+  const service =
+    state.mode === 'matrix' ? 'matrix' : state.mode === 'aprel' ? 'aprel' : 'reyohoho';
 
   if (!selectedFilm?.id || selectedFilm.id !== state.filmId) {
     selectedFilm = {
       id: state.filmId,
       name: state.title || `Фильм ${state.filmId}`,
-      year: ''
+      year: '',
+      service
     };
     selectedFilmTitle.textContent = state.title || `Фильм #${state.filmId}`;
     selectedFilmEl.classList.remove('hidden');
@@ -70,11 +120,29 @@ function applyFilmFromPlayerState(state) {
   }
 }
 
+function getMatrixShareLink(kpId) {
+  return `mtr-${String(kpId || '').replace(/\D/g, '')}`;
+}
+
+function getAprelShareLink(filmPath) {
+  const normalized = String(filmPath || '')
+    .replace(/^https?:\/\/(?:www\.)?aprelteam\.gokino\.by\//i, '')
+    .replace(/^\//, '')
+    .replace(/\.html$/i, '');
+  return `apr-${normalized.replace(/\//g, '--')}`;
+}
+
 function getRyhShareLink(value) {
   return `ryh-${value}`;
 }
 
-function getFilmShareLink(filmId) {
+function getFilmShareLink(filmId, service = videoService) {
+  if (service === 'matrix') {
+    return getMatrixShareLink(filmId);
+  }
+  if (service === 'aprel') {
+    return getAprelShareLink(filmId);
+  }
   return getRyhShareLink(filmId);
 }
 
@@ -148,7 +216,7 @@ async function copyFilmLink() {
     return;
   }
 
-  const link = getFilmShareLink(selectedFilm.id);
+  const link = getFilmShareLink(selectedFilm.id, selectedFilm.service || videoService);
 
   try {
     await copyTextToClipboard(link);
@@ -167,6 +235,7 @@ async function copyFilmLink() {
 function updateReplaceButton() {
   const canReplace = Boolean(selectedFilm?.id);
   replaceBtn.disabled = !canReplace;
+  replaceBtn.textContent = `Заменить на ${getServiceLabel()}`;
 }
 
 function clearSelection() {
@@ -180,20 +249,21 @@ function selectFilm(movie) {
   selectedFilm = {
     id: movie.id,
     name: movie.name,
-    year: movie.year
+    year: movie.year,
+    service: videoService
   };
 
   selectedFilmTitle.textContent = `${movie.name}${movie.year ? ` (${movie.year})` : ''}`;
   selectedFilmEl.classList.remove('hidden');
   updateReplaceButton();
-  showMessage('Нажмите «Заменить на ReYohoho»', '');
+  showMessage(`Нажмите «Заменить на ${getServiceLabel()}»`, '');
 
   searchResults.classList.add('hidden');
 }
 
 function setReplaceLoading(loading) {
   replaceBtn.disabled = loading || !selectedFilm?.id;
-  replaceBtn.textContent = loading ? 'Загрузка...' : 'Заменить на ReYohoho';
+  replaceBtn.textContent = loading ? 'Загрузка...' : `Заменить на ${getServiceLabel()}`;
 }
 
 function setYoutubeReplaceLoading(loading) {
@@ -222,8 +292,14 @@ async function runtimeMessage(payload) {
     if (message.includes('Extension context invalidated')) {
       message = 'Расширение было обновлено. Обновите страницу Twitch (F5).';
     } else if (message === 'Failed to fetch') {
-      message =
-        'Не удалось подключиться к reyohoho.com. Проверьте интернет и обновите расширение.';
+      const messages = {
+        matrix: 'Не удалось подключиться к gokino.by. Проверьте интернет и обновите расширение.',
+        aprel:
+          'Не удалось подключиться к aprelteam.gokino.by. Проверьте интернет и обновите расширение.',
+        reyohoho:
+          'Не удалось подключиться к reyohoho.com. Проверьте интернет и обновите расширение.'
+      };
+      message = messages[videoService] || messages.reyohoho;
     }
     throw new Error(message);
   }
@@ -313,7 +389,7 @@ function renderResults(results) {
       (movie) => `
       <button
         class="result-item${selectedFilm?.id === movie.id ? ' selected' : ''}"
-        data-id="${movie.id}"
+        data-id="${escapeHtml(String(movie.id))}"
         type="button"
       >
         ${
@@ -332,8 +408,8 @@ function renderResults(results) {
   searchResults.querySelectorAll('.result-item').forEach((btn) => {
     btn.addEventListener('click', (event) => {
       event.stopPropagation();
-      const id = Number(btn.dataset.id);
-      const movie = lastSearchResults.find((item) => item.id === id);
+      const id = btn.dataset.id;
+      const movie = lastSearchResults.find((item) => String(item.id) === id);
       if (movie) {
         selectFilm(movie);
       }
@@ -344,6 +420,10 @@ function renderResults(results) {
 }
 
 async function runSearch(query) {
+  if (videoService === 'matrix') {
+    return;
+  }
+
   const requestId = ++searchRequestId;
 
   searchResults.innerHTML = '<div class="loading">Поиск...</div>';
@@ -352,7 +432,8 @@ async function runSearch(query) {
   try {
     const response = await runtimeMessage({
       type: 'searchMovies',
-      query
+      query,
+      service: videoService
     });
 
     if (requestId !== searchRequestId) {
@@ -384,11 +465,59 @@ copyRoomLinkBtn.addEventListener('click', () => {
   copyRoomLink();
 });
 
+serviceReyohohoBtn.addEventListener('click', () => {
+  if (videoService !== 'reyohoho') {
+    setVideoService('reyohoho');
+  }
+});
+
+serviceAprelBtn.addEventListener('click', () => {
+  if (videoService !== 'aprel') {
+    setVideoService('aprel');
+  }
+});
+
+serviceMatrixBtn.addEventListener('click', () => {
+  if (videoService !== 'matrix') {
+    setVideoService('matrix');
+  }
+});
+
+function handleMatrixInput(rawValue) {
+  const kpId = String(rawValue || '').trim();
+  if (!/^\d{3,}$/.test(kpId)) {
+    clearSelection();
+    return;
+  }
+
+  selectedFilm = {
+    id: kpId,
+    name: `Кинопоиск #${kpId}`,
+    year: '',
+    service: 'matrix'
+  };
+  selectedFilmTitle.textContent = selectedFilm.name;
+  selectedFilmEl.classList.remove('hidden');
+  updateReplaceButton();
+  showMessage(`Нажмите «Заменить на ${getServiceLabel()}»`, '');
+}
+
 searchInput.addEventListener('input', () => {
   clearTimeout(searchTimer);
   clearSelection();
 
   const query = searchInput.value.trim();
+  if (videoService === 'matrix') {
+    searchResults.classList.add('hidden');
+    searchResults.innerHTML = '';
+    if (query.length >= 3) {
+      handleMatrixInput(query);
+    } else {
+      showMessage(query.length ? 'ID Кинопоиска — минимум 3 цифры' : '');
+    }
+    return;
+  }
+
   if (query.length < 2) {
     searchResults.classList.add('hidden');
     searchResults.innerHTML = '';
@@ -417,9 +546,11 @@ replaceBtn.addEventListener('click', async () => {
   showMessage('Загрузка плеера...', '');
 
   try {
+    const filmService = selectedFilm.service || videoService;
     const embedResponse = await runtimeMessage({
       type: 'getPlayerEmbed',
-      filmId: selectedFilm.id
+      filmId: selectedFilm.id,
+      service: filmService
     });
 
     if (!embedResponse.ok) {
@@ -432,14 +563,15 @@ replaceBtn.addEventListener('click', async () => {
       title: embedResponse.data.title,
       pageUrl: embedResponse.data.pageUrl,
       players: embedResponse.data.players,
-      activePlayerId: embedResponse.data.activePlayerId
+      activePlayerId: embedResponse.data.activePlayerId,
+      service: embedResponse.data.service || filmService
     });
 
     if (!response?.ok) {
       throw new Error(response?.error || 'Не удалось заменить плеер');
     }
 
-    setReyohohoActive(true);
+    setFilmActive(true, filmService);
     showMessage(`Воспроизводится: ${embedResponse.data.title}`, 'success');
     searchResults.classList.add('hidden');
   } catch (error) {
@@ -498,7 +630,7 @@ restoreBtn.addEventListener('click', async () => {
         await runtimeMessage({ type: 'clearYoutubeRoom' });
         setYoutubeActive(false);
       } else {
-        setReyohohoActive(false);
+        setFilmActive(false, stateResponse?.mode === 'aprel' ? 'aprel' : stateResponse?.mode === 'matrix' ? 'matrix' : 'reyohoho');
       }
       activePlayerFilmId = null;
       showMessage('Плеер Twitch восстановлен', 'success');
@@ -537,7 +669,9 @@ async function syncState() {
       );
     } else if (response?.active && response.filmId) {
       clearYoutubeRoomSelection();
-      setReyohohoActive(true);
+      const service =
+        response.mode === 'matrix' ? 'matrix' : response.mode === 'aprel' ? 'aprel' : 'reyohoho';
+      setFilmActive(true, service);
       applyFilmFromPlayerState(response);
       showMessage(response.title ? `Сейчас: ${response.title}` : '', 'success');
     } else {
@@ -552,4 +686,16 @@ async function syncState() {
   }
 }
 
-syncState();
+async function initPopup() {
+  const stored = await chrome.storage.local.get(['videoService']);
+  videoService =
+    stored.videoService === 'reyohoho'
+      ? 'reyohoho'
+      : stored.videoService === 'matrix'
+        ? 'matrix'
+        : 'aprel';
+  updateServiceUi();
+  await syncState();
+}
+
+initPopup();

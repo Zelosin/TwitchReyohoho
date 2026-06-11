@@ -68,7 +68,17 @@
   ];
 
   const CHAT_URL_PATTERNS = [
-    { type: 'film', pattern: /https?:\/\/(?:www\.)?reyohoho\.com\/films\/(\d+)/gi },
+    { type: 'film', service: 'reyohoho', pattern: /https?:\/\/(?:www\.)?reyohoho\.com\/films\/(\d+)/gi },
+    {
+      type: 'film',
+      service: 'aprel',
+      pattern: /https?:\/\/(?:www\.)?aprelteam\.gokino\.by\/((?:films|serials|mults|anime|nocategory)(?:\/[^/\s?#]+)*\/\d+-[^/\s?#]+)\.html/gi
+    },
+    {
+      type: 'film',
+      service: 'matrix',
+      pattern: /https?:\/\/(?:www\.)?gokino\.by\/matrix\/search\.php\?(?:[^#\s]*&)?q=(\d+)/gi
+    },
     {
       type: 'watchparty',
       pattern: /https?:\/\/(?:www\.)?watchparty\.me\/watch\/([a-z0-9-]+)/gi
@@ -76,6 +86,70 @@
   ];
 
   const RYH_SHORT_PATTERN = /\bryh-([a-z0-9-]+)\b/gi;
+  const APREL_SHORT_PATTERN =
+    /\bapr-((?:films|serials|mults|anime|nocategory)(?:--[a-z0-9-]+)+)\b/gi;
+  const MATRIX_SHORT_PATTERN = /\bmtr-(\d{3,})\b/gi;
+
+  const APREL_PATH_CATEGORIES = ['films', 'serials', 'mults', 'anime', 'nocategory'];
+
+  const SERVICE_LABELS = {
+    reyohoho: 'ReYohoho',
+    aprel: 'Aprel Kino',
+    matrix: 'Matrix'
+  };
+
+  function getServiceLabel(service) {
+    return SERVICE_LABELS[service] || SERVICE_LABELS.reyohoho;
+  }
+
+  function resolveFilmService(filmId, service) {
+    if (service === 'aprel' || service === 'reyohoho' || service === 'matrix') {
+      return service;
+    }
+    const id = String(filmId || '');
+    if (id.includes('/')) {
+      return 'aprel';
+    }
+    return 'reyohoho';
+  }
+
+  function getDefaultFilmPageUrl(filmId, service) {
+    const resolvedService = resolveFilmService(filmId, service);
+    if (resolvedService === 'matrix') {
+      const kpId = String(filmId || '').replace(/\D/g, '');
+      return `https://gokino.by/matrix/search.php?q=${kpId}`;
+    }
+    if (resolvedService === 'aprel') {
+      const path = String(filmId || '')
+        .replace(/^https?:\/\/(?:www\.)?aprelteam\.gokino\.by\//i, '')
+        .replace(/^\//, '')
+        .replace(/\.html$/i, '');
+      return `https://aprelteam.gokino.by/${path}.html`;
+    }
+    return `https://reyohoho.com/films/${filmId}`;
+  }
+
+  function aprelPathToShortLink(filmPath) {
+    const normalized = String(filmPath || '')
+      .replace(/^https?:\/\/(?:www\.)?aprelteam\.gokino\.by\//i, '')
+      .replace(/^\//, '')
+      .replace(/\.html$/i, '');
+    return `apr-${normalized.replace(/\//g, '--')}`;
+  }
+
+  function aprelShortLinkToPath(token) {
+    const parts = String(token || '').split('--');
+    if (parts.length < 2 || !APREL_PATH_CATEGORIES.includes(parts[0])) {
+      return null;
+    }
+
+    const lastPart = parts[parts.length - 1];
+    if (!/^\d+-/.test(lastPart)) {
+      return null;
+    }
+
+    return parts.join('/');
+  }
 
   const chatObservedRoots = new WeakSet();
   let chatScanTimer = null;
@@ -160,7 +234,7 @@
 
     vibixFilmReloadCount += 1;
     const filmPageUrl =
-      playerState.pageUrl || `https://reyohoho.com/films/${playerState.filmId}`;
+      playerState.pageUrl || getDefaultFilmPageUrl(playerState.filmId, playerState.mode);
     const reloadUrl = new URL(filmPageUrl);
     reloadUrl.searchParams.set('_ryh', String(Date.now()));
 
@@ -247,14 +321,15 @@
     return playerOrId.id === 'vibix' || playerOrId.type === 'vibix';
   }
 
-  async function applyPlayerSource(overlay, player, filmId, pageUrl) {
+  async function applyPlayerSource(overlay, player, filmId, pageUrl, service) {
     const iframe = overlay.querySelector('.ryh-player-frame');
     if (!iframe) {
       return;
     }
 
-    const filmPageUrl = pageUrl || `https://reyohoho.com/films/${filmId}`;
-    const isVibix = isVibixPlayer(player);
+    const filmService = resolveFilmService(filmId, service || playerState.mode);
+    const filmPageUrl = pageUrl || getDefaultFilmPageUrl(filmId, filmService);
+    const isVibix = filmService === 'reyohoho' && isVibixPlayer(player);
 
     if (!isVibix) {
       await disconnectWatchParty();
@@ -281,11 +356,12 @@
       player.type === 'iframe' && player.url ? player.url : filmPageUrl;
   }
 
-  function getStoredEmbedRef(player, filmId, pageUrl) {
-    if (player.id === 'vibix' || player.type === 'vibix') {
-      return pageUrl || `https://reyohoho.com/films/${filmId}`;
+  function getStoredEmbedRef(player, filmId, pageUrl, service) {
+    const filmService = resolveFilmService(filmId, service || playerState.mode);
+    if (filmService === 'reyohoho' && (player.id === 'vibix' || player.type === 'vibix')) {
+      return pageUrl || getDefaultFilmPageUrl(filmId, filmService);
     }
-    return player.url || pageUrl || `https://reyohoho.com/films/${filmId}`;
+    return player.url || pageUrl || getDefaultFilmPageUrl(filmId, filmService);
   }
 
   function deepQuerySelector(root, selector) {
@@ -568,7 +644,7 @@
           return;
         }
 
-        await applyPlayerSource(overlay, player, filmId, pageUrl);
+        await applyPlayerSource(overlay, player, filmId, pageUrl, playerState.mode);
         sourceBtn.textContent = `${player.name} ▾`;
         sourceMenu.querySelectorAll('.ryh-source-option').forEach((item) => {
           item.classList.toggle('active', item.dataset.playerId === player.id);
@@ -577,7 +653,7 @@
         sourceBtn.setAttribute('aria-expanded', 'false');
 
         playerState.activePlayerId = player.id;
-        playerState.embedUrl = getStoredEmbedRef(player, filmId, pageUrl);
+        playerState.embedUrl = getStoredEmbedRef(player, filmId, pageUrl, playerState.mode);
         storageSet({ playerState });
 
         if (isVibixPlayer(player)) {
@@ -685,7 +761,7 @@
     };
   }
 
-  function createOverlay(container, { title, players, activePlayerId, filmId, pageUrl }) {
+  function createOverlay(container, { title, players, activePlayerId, filmId, pageUrl, service }) {
     removeOverlay();
 
     const computed = window.getComputedStyle(container);
@@ -740,7 +816,7 @@
       </div>
     `;
 
-    applyPlayerSource(overlay, activePlayer, filmId, pageUrl).catch(() => {});
+    applyPlayerSource(overlay, activePlayer, filmId, pageUrl, service).catch(() => {});
 
     overlay.querySelector('.ryh-restore-btn').addEventListener('click', () => {
       restorePlayer();
@@ -827,8 +903,10 @@
     title,
     pageUrl,
     players,
-    activePlayerId
+    activePlayerId,
+    service
   }) {
+    const filmService = resolveFilmService(filmId, service);
     const sources = Array.isArray(players) && players.length ? players : [];
     if (!sources.length && !embedUrl) {
       return { ok: false, error: 'URL плеера не получен' };
@@ -837,16 +915,16 @@
     if (!sources.length && embedUrl) {
       sources.push({
         id: 'default',
-        name: 'ReYohoho',
+        name: getServiceLabel(filmService),
         type: 'iframe',
         url: embedUrl
       });
     }
 
     const activeId = activePlayerId || sources[0].id;
-    const filmPageUrl = pageUrl || `https://reyohoho.com/films/${filmId}`;
+    const filmPageUrl = pageUrl || getDefaultFilmPageUrl(filmId, filmService);
     const activeSource = sources.find((item) => item.id === activeId) || sources[0];
-    const resolvedUrl = getStoredEmbedRef(activeSource, filmId, filmPageUrl);
+    const resolvedUrl = getStoredEmbedRef(activeSource, filmId, filmPageUrl, filmService);
 
     let container = findPlayerContainer();
     if (!container) {
@@ -871,12 +949,13 @@
       players: sources,
       activePlayerId: activeId,
       filmId,
-      pageUrl: filmPageUrl
+      pageUrl: filmPageUrl,
+      service: filmService
     });
 
     playerState = {
       active: true,
-      mode: 'reyohoho',
+      mode: filmService,
       filmId,
       title: title || `Фильм ${filmId}`,
       embedUrl: resolvedUrl,
@@ -919,10 +998,11 @@
     return { ok: true };
   }
 
-  async function loadFilmById(filmId) {
+  async function loadFilmById(filmId, service) {
     const response = await sendRuntimeMessage({
       type: 'getPlayerEmbed',
-      filmId
+      filmId,
+      service
     });
 
     if (!response?.ok) {
@@ -935,7 +1015,8 @@
       title: response.data.title,
       pageUrl: response.data.pageUrl,
       players: response.data.players,
-      activePlayerId: response.data.activePlayerId
+      activePlayerId: response.data.activePlayerId,
+      service: response.data.service || service
     });
   }
 
@@ -1041,6 +1122,7 @@
         }
 
         const filmId = target.dataset.filmId;
+        const filmService = target.dataset.filmService;
         const roomSlug = target.dataset.roomSlug;
         if (!filmId && !roomSlug) {
           return;
@@ -1055,7 +1137,7 @@
 
         target.classList.add('ryh-chat-link-loading');
         if (filmId) {
-          await loadFilmById(Number(filmId));
+          await loadFilmById(filmId, filmService || undefined);
         } else {
           await loadWatchPartyRoom(roomSlug);
         }
@@ -1078,7 +1160,46 @@
 
       anchor.classList.add('ryh-chat-link');
       anchor.dataset.filmId = match[1];
+      anchor.dataset.filmService = 'reyohoho';
       anchor.title = `Смотреть на ReYohoho (ID: ${match[1]})`;
+    });
+  }
+
+  function markAprelAnchors(root) {
+    deepQueryAll(root, 'a[href*="aprelteam.gokino.by/"]').forEach((anchor) => {
+      if (anchor.classList.contains('ryh-chat-link')) {
+        return;
+      }
+
+      const match = anchor.href.match(
+        /aprelteam\.gokino\.by\/((?:films|serials|mults|anime|nocategory)(?:\/[^/?#]+)*\/\d+-[^/?#]+)\.html/i
+      );
+      if (!match) {
+        return;
+      }
+
+      anchor.classList.add('ryh-chat-link');
+      anchor.dataset.filmId = match[1];
+      anchor.dataset.filmService = 'aprel';
+      anchor.title = `Смотреть на Aprel Kino (${match[1]})`;
+    });
+  }
+
+  function markMatrixAnchors(root) {
+    deepQueryAll(root, 'a[href*="gokino.by/matrix/search.php"]').forEach((anchor) => {
+      if (anchor.classList.contains('ryh-chat-link')) {
+        return;
+      }
+
+      const match = anchor.href.match(/[?&]q=(\d{3,})/i);
+      if (!match) {
+        return;
+      }
+
+      anchor.classList.add('ryh-chat-link');
+      anchor.dataset.filmId = match[1];
+      anchor.dataset.filmService = 'matrix';
+      anchor.title = `Смотреть на Matrix (KP ${match[1]})`;
     });
   }
 
@@ -1087,6 +1208,7 @@
     if (/^\d+$/.test(token)) {
       return {
         type: 'film',
+        service: 'reyohoho',
         fullMatch: match[0],
         index: match.index,
         filmId: token,
@@ -1107,6 +1229,34 @@
     return null;
   }
 
+  function parseMatrixShortLink(match) {
+    const kpId = match[1];
+    return {
+      type: 'film',
+      service: 'matrix',
+      fullMatch: match[0],
+      index: match.index,
+      filmId: kpId,
+      slug: null
+    };
+  }
+
+  function parseAprelShortLink(match) {
+    const path = aprelShortLinkToPath(match[1]);
+    if (!path) {
+      return null;
+    }
+
+    return {
+      type: 'film',
+      service: 'aprel',
+      fullMatch: match[0],
+      index: match.index,
+      filmId: path,
+      slug: null
+    };
+  }
+
   function extractChatLinkFromText(text) {
     if (!text) {
       return null;
@@ -1114,7 +1264,7 @@
 
     let best = null;
 
-    for (const { type, pattern } of CHAT_URL_PATTERNS) {
+    for (const { type, service, pattern } of CHAT_URL_PATTERNS) {
       pattern.lastIndex = 0;
       const match = pattern.exec(text);
       if (!match) {
@@ -1123,6 +1273,7 @@
 
       const item = {
         type,
+        service: service || (type === 'film' ? 'reyohoho' : ''),
         fullMatch: match[0],
         index: match.index,
         filmId: type === 'film' ? match[1] : null,
@@ -1143,6 +1294,24 @@
       }
     }
 
+    APREL_SHORT_PATTERN.lastIndex = 0;
+    const aprelMatch = APREL_SHORT_PATTERN.exec(text);
+    if (aprelMatch) {
+      const item = parseAprelShortLink(aprelMatch);
+      if (item && (!best || item.index < best.index)) {
+        best = item;
+      }
+    }
+
+    MATRIX_SHORT_PATTERN.lastIndex = 0;
+    const matrixMatch = MATRIX_SHORT_PATTERN.exec(text);
+    if (matrixMatch) {
+      const item = parseMatrixShortLink(matrixMatch);
+      if (item && (!best || item.index < best.index)) {
+        best = item;
+      }
+    }
+
     return best;
   }
 
@@ -1156,7 +1325,8 @@
 
     if (linkInfo.type === 'film') {
       element.dataset.filmId = linkInfo.filmId;
-      element.title = `Смотреть на ReYohoho (ID: ${linkInfo.filmId})`;
+      element.dataset.filmService = linkInfo.service || 'reyohoho';
+      element.title = `Смотреть на ${getServiceLabel(linkInfo.service || 'reyohoho')} (${linkInfo.filmId})`;
       return;
     }
 
@@ -1210,6 +1380,8 @@
   function scanAllChatLinks() {
     getChatRoots().forEach((root) => {
       markReyohohoAnchors(root);
+      markAprelAnchors(root);
+      markMatrixAnchors(root);
       markWatchpartyAnchors(root);
       markChatMessagesByOriginalText(root);
 
@@ -1312,7 +1484,8 @@
 
     if (linkInfo.type === 'film') {
       link.dataset.filmId = linkInfo.filmId;
-      link.title = `Смотреть на ReYohoho (ID: ${linkInfo.filmId})`;
+      link.dataset.filmService = linkInfo.service || 'reyohoho';
+      link.title = `Смотреть на ${getServiceLabel(linkInfo.service || 'reyohoho')} (${linkInfo.filmId})`;
     } else {
       link.dataset.roomSlug = linkInfo.slug;
       link.title = `Присоединиться к WatchParty (${linkInfo.slug})`;
@@ -1392,7 +1565,7 @@
     }
 
     if (message.type === 'loadFilmById') {
-      loadFilmById(message.filmId)
+      loadFilmById(message.filmId, message.service)
         .then(sendResponse)
         .catch((error) => sendResponse({ ok: false, error: error.message }));
       return true;
@@ -1451,11 +1624,12 @@
         return;
       }
 
-      if (!stored.playerState.embedUrl) {
+      if (!stored.playerState.embedUrl && !stored.playerState.pageUrl) {
         return;
       }
 
       playerState = stored.playerState;
+      const filmService = resolveFilmService(playerState.filmId, playerState.mode);
       const tryRestore = (attempt = 0) => {
         const container = findPlayerContainer();
         if (container) {
@@ -1463,9 +1637,9 @@
             ? playerState.players
             : [{
                 id: 'default',
-                name: 'ReYohoho',
+                name: getServiceLabel(filmService),
                 type: 'iframe',
-                url: playerState.embedUrl
+                url: playerState.embedUrl || playerState.pageUrl
               }];
 
           createOverlay(container, {
@@ -1473,7 +1647,8 @@
             players,
             activePlayerId: playerState.activePlayerId || players[0].id,
             filmId: playerState.filmId,
-            pageUrl: playerState.pageUrl
+            pageUrl: playerState.pageUrl,
+            service: filmService
           });
           return;
         }
