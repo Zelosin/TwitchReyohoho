@@ -14,6 +14,8 @@ const serviceReyohohoBtn = document.getElementById('serviceReyohoho');
 const serviceAprelBtn = document.getElementById('serviceAprel');
 const serviceMatrixBtn = document.getElementById('serviceMatrix');
 const searchLabel = document.getElementById('searchLabel');
+const syncToggleWrap = document.getElementById('syncToggleWrap');
+const syncToggle = document.getElementById('syncToggle');
 
 const SEARCH_DELAY_MS = 500;
 const SERVICE_LABELS = {
@@ -72,6 +74,14 @@ async function setVideoService(service) {
   showMessage('');
 }
 
+function updateSyncToggleUi(active, mode, syncEnabled = false) {
+  const supported = active && (mode === 'aprel' || mode === 'matrix');
+  syncToggleWrap.classList.toggle('hidden', !supported);
+  if (supported) {
+    syncToggle.checked = Boolean(syncEnabled);
+  }
+}
+
 function setFilmActive(active, service = videoService) {
   const label = getServiceLabel(service);
   statusBadge.textContent = active ? label : 'Twitch';
@@ -90,6 +100,7 @@ function setYoutubeActive(active, roomUrl = '', roomId = '') {
   statusBadge.textContent = active ? 'YouTube' : 'Twitch';
   statusBadge.className = `badge${active ? ' youtube' : ''}`;
   restoreBtn.classList.toggle('hidden', !active);
+  updateSyncToggleUi(false, 'youtube', false);
   if (active) {
     applyYoutubeRoomFromState({ roomId, roomUrl });
     return;
@@ -672,11 +683,13 @@ async function syncState() {
       const service =
         response.mode === 'matrix' ? 'matrix' : response.mode === 'aprel' ? 'aprel' : 'reyohoho';
       setFilmActive(true, service);
+      updateSyncToggleUi(true, service, response.syncEnabled);
       applyFilmFromPlayerState(response);
       showMessage(response.title ? `Сейчас: ${response.title}` : '', 'success');
     } else {
       activePlayerFilmId = null;
       clearYoutubeRoomSelection();
+      updateSyncToggleUi(false, videoService, false);
       if (!selectedFilm?.id) {
         showMessage('');
       }
@@ -687,7 +700,7 @@ async function syncState() {
 }
 
 async function initPopup() {
-  const stored = await chrome.storage.local.get(['videoService']);
+  const stored = await chrome.storage.local.get(['videoService', 'playerSyncEnabled']);
   videoService =
     stored.videoService === 'reyohoho'
       ? 'reyohoho'
@@ -695,7 +708,27 @@ async function initPopup() {
         ? 'matrix'
         : 'aprel';
   updateServiceUi();
+  if (typeof stored.playerSyncEnabled === 'boolean') {
+    syncToggle.checked = stored.playerSyncEnabled;
+  }
   await syncState();
 }
+
+syncToggle?.addEventListener('change', async () => {
+  const enabled = syncToggle.checked;
+  await chrome.storage.local.set({ playerSyncEnabled: enabled });
+
+  const tab = await getActiveTwitchTab();
+  if (!tab) {
+    return;
+  }
+
+  try {
+    await ensureContentScript(tab.id);
+    await sendToContentScript('setPlayerSyncEnabled', { enabled });
+  } catch {
+    /* ignore */
+  }
+});
 
 initPopup();

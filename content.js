@@ -165,13 +165,243 @@
     roomId: '',
     roomUrl: '',
     players: [],
-    activePlayerId: ''
+    activePlayerId: '',
+    syncEnabled: false,
+    syncViewerCount: 0
   };
+
+  let syncBridgeTimer = null;
+
+  function isSyncSupportedMode(mode) {
+    return mode === 'aprel' || mode === 'matrix';
+  }
+
+  function updateSyncUi(overlay) {
+    if (!overlay) {
+      overlay = document.getElementById(OVERLAY_ID);
+    }
+    if (!overlay) {
+      return;
+    }
+
+    const supported = isSyncSupportedMode(playerState.mode);
+    const syncWrap = overlay.querySelector('.ryh-sync-wrap');
+    const seekWrap = overlay.querySelector('.ryh-sync-seek-wrap');
+    if (syncWrap) {
+      syncWrap.classList.toggle('hidden', !supported);
+    }
+    if (seekWrap) {
+      seekWrap.classList.toggle('hidden', !supported || !playerState.syncEnabled);
+    }
+
+    const checkbox = overlay.querySelector('.ryh-sync-checkbox');
+    if (checkbox) {
+      checkbox.checked = Boolean(playerState.syncEnabled);
+    }
+
+    const viewerEl = overlay.querySelector('.ryh-sync-viewers');
+    if (viewerEl) {
+      if (!supported || !playerState.syncEnabled) {
+        viewerEl.textContent = '';
+        viewerEl.classList.add('hidden');
+      } else {
+        const count = Number(playerState.syncViewerCount) || 0;
+        viewerEl.textContent = count > 0 ? `${count} зрит.` : '';
+        viewerEl.classList.toggle('hidden', count <= 0);
+      }
+    }
+  }
+
+  function scheduleSyncBridgeJoin() {
+    if (!playerState.syncEnabled || !isSyncSupportedMode(playerState.mode)) {
+      return;
+    }
+
+    if (syncBridgeTimer) {
+      clearTimeout(syncBridgeTimer);
+    }
+
+    syncBridgeTimer = setTimeout(() => {
+      syncBridgeTimer = null;
+      joinPlayerSync().catch(() => {});
+    }, 1200);
+  }
+
+  async function joinPlayerSync() {
+    if (!playerState.syncEnabled || !isSyncSupportedMode(playerState.mode) || !playerState.filmId) {
+      return { ok: false };
+    }
+
+    return sendRuntimeMessage({
+      type: 'joinPlayerSync',
+      service: playerState.mode,
+      filmId: playerState.filmId
+    }).catch(() => ({ ok: false }));
+  }
+
+  async function leavePlayerSync() {
+    if (syncBridgeTimer) {
+      clearTimeout(syncBridgeTimer);
+      syncBridgeTimer = null;
+    }
+
+    playerState.syncViewerCount = 0;
+    return sendRuntimeMessage({ type: 'leavePlayerSync' }).catch(() => ({ ok: true }));
+  }
+
+  async function setPlayerSyncEnabled(enabled) {
+    const next = Boolean(enabled);
+    if (next === playerState.syncEnabled) {
+      updateSyncUi();
+      return { ok: true };
+    }
+
+    playerState.syncEnabled = next;
+    playerState.syncViewerCount = 0;
+    await storageSet({ playerState, playerSyncEnabled: next });
+    updateSyncUi();
+
+    if (next) {
+      scheduleSyncBridgeJoin();
+      await joinPlayerSync();
+    } else {
+      await leavePlayerSync();
+    }
+
+    return { ok: true };
+  }
+
+  async function handleSyncSeekDelta(delta) {
+    if (!playerState.syncEnabled) {
+      return;
+    }
+
+    await sendRuntimeMessage({
+      type: 'playerSyncSeekDelta',
+      delta: Number(delta)
+    }).catch(() => {});
+  }
+
+  function bindSyncControls(overlay) {
+    const syncWrap = overlay.querySelector('.ryh-sync-wrap');
+    if (!syncWrap) {
+      return;
+    }
+
+    const checkbox = overlay.querySelector('.ryh-sync-checkbox');
+    checkbox?.addEventListener('change', () => {
+      setPlayerSyncEnabled(checkbox.checked).catch(() => {});
+    });
+
+    overlay.querySelector('.ryh-seek-back')?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      handleSyncSeekDelta(-10).catch(() => {});
+    });
+
+    overlay.querySelector('.ryh-seek-forward')?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      handleSyncSeekDelta(10).catch(() => {});
+    });
+
+    updateSyncUi(overlay);
+  }
+
+  function initSyncMessageListener() {
+    window.addEventListener('message', (event) => {
+      if (event.source !== window) {
+        return;
+      }
+
+      const data = event.data;
+      if (data?.source !== 'ryh-player-sync') {
+        return;
+      }
+
+      if (data.type === 'sync-viewers') {
+        playerState.syncViewerCount = Number(data.detail?.count) || 0;
+        updateSyncUi();
+        return;
+      }
+
+      if (data.type === 'sync-disconnected') {
+        if (playerState.syncEnabled) {
+          playerState.syncViewerCount = 0;
+          updateSyncUi();
+        }
+      }
+    });
+  }
 
   let sourceMenuCloser = null;
   let vibixIsolationTimers = [];
   let vibixFilmReloadCount = 0;
   let vibixIsolationDone = false;
+  let playerSourceLoadGeneration = 0;
+  let restoreLoadToken = 0;
+
+  function cancelPendingPlayerLoads() {
+    restoreLoadToken += 1;
+    playerSourceLoadGeneration += 1;
+    if (syncBridgeTimer) {
+      clearTimeout(syncBridgeTimer);
+      syncBridgeTimer = null;
+    }
+  }
+
+  function isGokinoPageUrl(url) {
+    try {
+      const parsed = new URL(String(url || '').trim(), 'https://aprelteam.gokino.by');
+      const host = parsed.hostname.toLowerCase();
+      if (!host.includes('gokino.by')) {
+        return false;
+      }
+
+      const path = parsed.pathname.toLowerCase();
+      if (/\/matrix\/search\.php/i.test(path)) {
+        return true;
+      }
+
+      return (
+        /\.html$/i.test(path) &&
+        /\/(films|serials|mults|anime|nocategory)\//i.test(path)
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  function pickEmbeddableUrl(...candidates) {
+    for (const candidate of candidates) {
+      const url = String(candidate || '').trim();
+      if (!url || url === 'about:blank') {
+        continue;
+      }
+      if (isGokinoPageUrl(url)) {
+        continue;
+      }
+      return url;
+    }
+    return '';
+  }
+
+  function resolveIframeSrc(player, filmPageUrl, fallbackEmbedUrl, allPlayers = []) {
+    const playerList = Array.isArray(allPlayers) ? allPlayers : [];
+    const embedUrl = pickEmbeddableUrl(
+      player?.url,
+      fallbackEmbedUrl,
+      ...playerList.map((item) => item?.url)
+    );
+
+    if (embedUrl) {
+      return embedUrl;
+    }
+
+    if (filmPageUrl && !isGokinoPageUrl(filmPageUrl)) {
+      return filmPageUrl;
+    }
+
+    return '';
+  }
   const VIBIX_ISOLATION_FALLBACK_MS = 4000;
   const VIBIX_MAX_FILM_RELOADS = 2;
 
@@ -321,7 +551,15 @@
     return playerOrId.id === 'vibix' || playerOrId.type === 'vibix';
   }
 
-  async function applyPlayerSource(overlay, player, filmId, pageUrl, service) {
+  async function applyPlayerSource(
+    overlay,
+    player,
+    filmId,
+    pageUrl,
+    service,
+    fallbackEmbedUrl,
+    allPlayers = []
+  ) {
     const iframe = overlay.querySelector('.ryh-player-frame');
     if (!iframe) {
       return;
@@ -330,9 +568,23 @@
     const filmService = resolveFilmService(filmId, service || playerState.mode);
     const filmPageUrl = pageUrl || getDefaultFilmPageUrl(filmId, filmService);
     const isVibix = filmService === 'reyohoho' && isVibixPlayer(player);
+    const loadGeneration = ++playerSourceLoadGeneration;
+    const iframeSrc = resolveIframeSrc(player, filmPageUrl, fallbackEmbedUrl, allPlayers);
+
+    if (!iframeSrc || iframeSrc === 'about:blank') {
+      throw new Error('Не найден embed URL плеера');
+    }
 
     if (!isVibix) {
       await disconnectWatchParty();
+    }
+
+    if (isSyncSupportedMode(filmService) && !playerState.syncEnabled) {
+      await leavePlayerSync();
+    }
+
+    if (loadGeneration !== playerSourceLoadGeneration) {
+      throw new Error('Загрузка плеера отменена');
     }
 
     clearVibixIsolationTimers();
@@ -352,16 +604,34 @@
     }
 
     iframe.onload = null;
-    iframe.src =
-      player.type === 'iframe' && player.url ? player.url : filmPageUrl;
+    iframe.src = iframeSrc;
+
+    if (isSyncSupportedMode(filmService) && playerState.syncEnabled) {
+      iframe.onload = () => {
+        if (loadGeneration !== playerSourceLoadGeneration) {
+          return;
+        }
+        scheduleSyncBridgeJoin();
+      };
+    }
   }
 
-  function getStoredEmbedRef(player, filmId, pageUrl, service) {
+  function getStoredEmbedRef(player, filmId, pageUrl, service, allPlayers = []) {
     const filmService = resolveFilmService(filmId, service || playerState.mode);
     if (filmService === 'reyohoho' && (player.id === 'vibix' || player.type === 'vibix')) {
       return pageUrl || getDefaultFilmPageUrl(filmId, filmService);
     }
-    return player.url || pageUrl || getDefaultFilmPageUrl(filmId, filmService);
+
+    const embedUrl = pickEmbeddableUrl(
+      player?.url,
+      ...allPlayers.map((item) => item?.url)
+    );
+    if (embedUrl) {
+      return embedUrl;
+    }
+
+    const page = pageUrl || getDefaultFilmPageUrl(filmId, filmService);
+    return isGokinoPageUrl(page) ? '' : page;
   }
 
   function deepQuerySelector(root, selector) {
@@ -644,7 +914,15 @@
           return;
         }
 
-        await applyPlayerSource(overlay, player, filmId, pageUrl, playerState.mode);
+        await applyPlayerSource(
+          overlay,
+          player,
+          filmId,
+          pageUrl,
+          playerState.mode,
+          getStoredEmbedRef(player, filmId, pageUrl, playerState.mode, players),
+          players
+        );
         sourceBtn.textContent = `${player.name} ▾`;
         sourceMenu.querySelectorAll('.ryh-source-option').forEach((item) => {
           item.classList.toggle('active', item.dataset.playerId === player.id);
@@ -761,7 +1039,10 @@
     };
   }
 
-  function createOverlay(container, { title, players, activePlayerId, filmId, pageUrl, service }) {
+  async function createOverlay(
+    container,
+    { title, players, activePlayerId, filmId, pageUrl, service, fallbackEmbedUrl }
+  ) {
     removeOverlay();
 
     const computed = window.getComputedStyle(container);
@@ -771,6 +1052,7 @@
 
     const activePlayer = players.find((item) => item.id === activePlayerId) || players[0];
     const hasMultipleSources = players.length > 1;
+    const showSyncUi = isSyncSupportedMode(service || playerState.mode);
 
     const overlay = document.createElement('div');
     overlay.id = OVERLAY_ID;
@@ -779,6 +1061,21 @@
       <div class="ryh-player-bar">
         <span class="ryh-player-title">${escapeHtml(title)}</span>
         <div class="ryh-bar-actions">
+          ${
+            showSyncUi
+              ? `<div class="ryh-sync-wrap">
+                  <label class="ryh-sync-toggle" title="Синхронизировать перемотку с другими зрителями">
+                    <input type="checkbox" class="ryh-sync-checkbox" />
+                    <span class="ryh-sync-label">Синхр.</span>
+                  </label>
+                  <span class="ryh-sync-viewers hidden"></span>
+                  <div class="ryh-sync-seek-wrap hidden">
+                    <button type="button" class="ryh-seek-btn ryh-seek-back" title="−10 сек">−10</button>
+                    <button type="button" class="ryh-seek-btn ryh-seek-forward" title="+10 сек">+10</button>
+                  </div>
+                </div>`
+              : ''
+          }
           ${
             hasMultipleSources
               ? `<div class="ryh-source-wrap">
@@ -816,11 +1113,13 @@
       </div>
     `;
 
-    applyPlayerSource(overlay, activePlayer, filmId, pageUrl, service).catch(() => {});
-
     overlay.querySelector('.ryh-restore-btn').addEventListener('click', () => {
       restorePlayer();
     });
+
+    if (showSyncUi) {
+      bindSyncControls(overlay);
+    }
 
     if (hasMultipleSources) {
       bindSourceMenu(overlay, players, activePlayer.id, filmId, pageUrl);
@@ -830,6 +1129,21 @@
 
     container.appendChild(overlay);
     pauseTwitchVideo();
+
+    try {
+      await applyPlayerSource(
+        overlay,
+        activePlayer,
+        filmId,
+        pageUrl,
+        service,
+        fallbackEmbedUrl,
+        players
+      );
+    } catch (error) {
+      removeOverlay();
+      throw error;
+    }
   }
 
   function escapeHtml(text) {
@@ -906,6 +1220,8 @@
     activePlayerId,
     service
   }) {
+    cancelPendingPlayerLoads();
+
     const filmService = resolveFilmService(filmId, service);
     const sources = Array.isArray(players) && players.length ? players : [];
     if (!sources.length && !embedUrl) {
@@ -924,7 +1240,13 @@
     const activeId = activePlayerId || sources[0].id;
     const filmPageUrl = pageUrl || getDefaultFilmPageUrl(filmId, filmService);
     const activeSource = sources.find((item) => item.id === activeId) || sources[0];
-    const resolvedUrl = getStoredEmbedRef(activeSource, filmId, filmPageUrl, filmService);
+    const resolvedUrl =
+      pickEmbeddableUrl(embedUrl, activeSource?.url, ...sources.map((item) => item?.url)) ||
+      getStoredEmbedRef(activeSource, filmId, filmPageUrl, filmService, sources);
+
+    if (!resolvedUrl) {
+      return { ok: false, error: 'Не найден embed URL плеера' };
+    }
 
     let container = findPlayerContainer();
     if (!container) {
@@ -944,14 +1266,34 @@
       await disconnectWatchParty();
     }
 
-    createOverlay(container, {
-      title: title || `Фильм ${filmId}`,
-      players: sources,
-      activePlayerId: activeId,
-      filmId,
-      pageUrl: filmPageUrl,
-      service: filmService
-    });
+    if (syncBridgeTimer) {
+      clearTimeout(syncBridgeTimer);
+      syncBridgeTimer = null;
+    }
+    await leavePlayerSync();
+
+    const storedSync = await storageGet(['playerSyncEnabled']);
+    const syncEnabled =
+      isSyncSupportedMode(filmService) &&
+      (typeof storedSync.playerSyncEnabled === 'boolean'
+        ? storedSync.playerSyncEnabled
+        : Boolean(playerState.syncEnabled));
+
+    playerState.syncEnabled = syncEnabled;
+
+    try {
+      await createOverlay(container, {
+        title: title || `Фильм ${filmId}`,
+        players: sources,
+        activePlayerId: activeId,
+        filmId,
+        pageUrl: filmPageUrl,
+        service: filmService,
+        fallbackEmbedUrl: resolvedUrl
+      });
+    } catch (error) {
+      return { ok: false, error: error?.message || 'Не удалось загрузить плеер' };
+    }
 
     playerState = {
       active: true,
@@ -963,10 +1305,17 @@
       roomId: '',
       roomUrl: '',
       players: sources,
-      activePlayerId: activeId
+      activePlayerId: activeId,
+      syncEnabled,
+      syncViewerCount: 0
     };
 
-    await storageSet({ playerState });
+    await storageSet({ playerState, playerSyncEnabled: syncEnabled });
+
+    if (playerState.syncEnabled) {
+      scheduleSyncBridgeJoin();
+    }
+
     return { ok: true, title: playerState.title };
   }
 
@@ -976,6 +1325,8 @@
     if (!wasYoutube) {
       await disconnectWatchParty();
     }
+
+    await leavePlayerSync();
 
     removeOverlay();
     playerState = {
@@ -988,7 +1339,9 @@
       roomId: '',
       roomUrl: '',
       players: [],
-      activePlayerId: ''
+      activePlayerId: '',
+      syncEnabled: false,
+      syncViewerCount: 0
     };
     await storageSet({ playerState });
     if (wasYoutube) {
@@ -999,24 +1352,32 @@
   }
 
   async function loadFilmById(filmId, service) {
+    cancelPendingPlayerLoads();
+
+    const resolvedService = resolveFilmService(filmId, service);
     const response = await sendRuntimeMessage({
       type: 'getPlayerEmbed',
       filmId,
-      service
+      service: resolvedService
     });
 
     if (!response?.ok) {
       return { ok: false, error: response?.error || 'Ошибка загрузки фильма' };
     }
 
+    const data = response.data || {};
+    const sources = Array.isArray(data.players) ? data.players : [];
+    const embedUrl =
+      pickEmbeddableUrl(data.embedUrl, ...sources.map((item) => item?.url)) || data.embedUrl;
+
     return replacePlayer({
-      filmId,
-      embedUrl: response.data.embedUrl,
-      title: response.data.title,
-      pageUrl: response.data.pageUrl,
-      players: response.data.players,
-      activePlayerId: response.data.activePlayerId,
-      service: response.data.service || service
+      filmId: data.filmId || filmId,
+      embedUrl,
+      title: data.title,
+      pageUrl: data.pageUrl,
+      players: sources,
+      activePlayerId: data.activePlayerId,
+      service: data.service || resolvedService
     });
   }
 
@@ -1136,12 +1497,24 @@
         }
 
         target.classList.add('ryh-chat-link-loading');
-        if (filmId) {
-          await loadFilmById(filmId, filmService || undefined);
-        } else {
-          await loadWatchPartyRoom(roomSlug);
-        }
-        target.classList.remove('ryh-chat-link-loading');
+        const linkFilmId = filmId;
+        const linkService = filmService || resolveFilmService(filmId);
+        window.setTimeout(async () => {
+          try {
+            if (linkFilmId) {
+              const result = await loadFilmById(linkFilmId, linkService);
+              if (!result?.ok) {
+                console.warn('[RYH] Не удалось загрузить фильм:', result?.error);
+              }
+            } else {
+              await loadWatchPartyRoom(roomSlug);
+            }
+          } catch (error) {
+            console.warn('[RYH] Ошибка загрузки из чата:', error);
+          } finally {
+            target.classList.remove('ryh-chat-link-loading');
+          }
+        }, 0);
       },
       true
     );
@@ -1549,7 +1922,8 @@
           title: playerState.title,
           filmId: playerState.filmId,
           roomId: playerState.roomId,
-          roomUrl: playerState.roomUrl
+          roomUrl: playerState.roomUrl,
+          syncEnabled: playerState.syncEnabled
         });
       })().catch(() => {
         sendResponse({
@@ -1558,9 +1932,17 @@
           title: playerState.title,
           filmId: playerState.filmId,
           roomId: playerState.roomId,
-          roomUrl: playerState.roomUrl
+          roomUrl: playerState.roomUrl,
+          syncEnabled: playerState.syncEnabled
         });
       });
+      return true;
+    }
+
+    if (message.type === 'setPlayerSyncEnabled') {
+      setPlayerSyncEnabled(Boolean(message.enabled))
+        .then(sendResponse)
+        .catch((error) => sendResponse({ ok: false, error: error.message }));
       return true;
     }
 
@@ -1614,9 +1996,13 @@
   }
 
   function restoreFromStorage() {
-    storageGet(['playerState', 'youtubeRoomState']).then((stored) => {
+    storageGet(['playerState', 'youtubeRoomState', 'playerSyncEnabled']).then((stored) => {
       if (!stored.playerState?.active) {
         return;
+      }
+
+      if (typeof stored.playerSyncEnabled === 'boolean') {
+        stored.playerState.syncEnabled = stored.playerSyncEnabled;
       }
 
       if (stored.playerState.mode === 'youtube') {
@@ -1628,9 +2014,18 @@
         return;
       }
 
-      playerState = stored.playerState;
+      playerState = {
+        ...stored.playerState,
+        syncEnabled: Boolean(stored.playerState.syncEnabled),
+        syncViewerCount: 0
+      };
       const filmService = resolveFilmService(playerState.filmId, playerState.mode);
-      const tryRestore = (attempt = 0) => {
+      const restoreToken = restoreLoadToken;
+      const tryRestore = async (attempt = 0) => {
+        if (restoreToken !== restoreLoadToken) {
+          return;
+        }
+
         const container = findPlayerContainer();
         if (container) {
           const players = playerState.players?.length
@@ -1642,23 +2037,45 @@
                 url: playerState.embedUrl || playerState.pageUrl
               }];
 
-          createOverlay(container, {
-            title: playerState.title,
-            players,
-            activePlayerId: playerState.activePlayerId || players[0].id,
-            filmId: playerState.filmId,
-            pageUrl: playerState.pageUrl,
-            service: filmService
-          });
+          try {
+            await createOverlay(container, {
+              title: playerState.title,
+              players,
+              activePlayerId: playerState.activePlayerId || players[0].id,
+              filmId: playerState.filmId,
+              pageUrl: playerState.pageUrl,
+              service: filmService,
+              fallbackEmbedUrl:
+                pickEmbeddableUrl(
+                  playerState.embedUrl,
+                  ...players.map((item) => item?.url)
+                ) || playerState.embedUrl
+            });
+          } catch {
+            return;
+          }
+
+          if (restoreToken !== restoreLoadToken) {
+            removeOverlay();
+            return;
+          }
+
+          if (playerState.syncEnabled) {
+            scheduleSyncBridgeJoin();
+          }
           return;
         }
         if (attempt < 20) {
-          setTimeout(() => tryRestore(attempt + 1), 500);
+          setTimeout(() => {
+            tryRestore(attempt + 1).catch(() => {});
+          }, 500);
         }
       };
-      tryRestore();
+      tryRestore().catch(() => {});
     });
   }
+
+  initSyncMessageListener();
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => {

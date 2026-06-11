@@ -110,6 +110,8 @@
     }
   }
 
+  const SYNC_SERVER_URL = 'wss://sync.videoframe2.com';
+
   window.__RYH_EXT__ = {
     isExtensionContextValid,
     isInvalidatedError,
@@ -117,6 +119,7 @@
     safeRuntimeSendMessage,
     safeStorageGet,
     safeStorageSet,
-    safeStorageRemove
+    safeStorageRemove,
+    SYNC_SERVER_URL
   };
 })();

@@ -4,6 +4,7 @@ const REYOHOHO_ORIGIN = 'https://reyohoho.com';
 const REYOHOHO_ORIGINS = ['https://reyohoho.com', 'https://www.reyohoho.com'];
 const APREL_ORIGIN = 'https://aprelteam.gokino.by';
 const MATRIX_ORIGIN = 'https://gokino.by';
+const VIBIX_SYNC_WS_ORIGIN = 'wss://sync.videoframe2.com';
 
 const FETCH_HEADERS = {
   Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -769,6 +770,216 @@ async function leaveWatchPartyInTab(tabId) {
   return { ok: true };
 }
 
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function buildSyncRoomId(service, filmId) {
+  if (service === 'matrix') {
+    const kpId = String(filmId || '').replace(/\D/g, '');
+    return kpId ? `matrix_${kpId}` : '';
+  }
+
+  if (service === 'aprel') {
+    const path = String(filmId || '')
+      .replace(/^https?:\/\/(?:www\.)?aprelteam\.gokino\.by\//i, '')
+      .replace(/^\//, '')
+      .replace(/\.html$/i, '')
+      .replace(/\//g, '_');
+    return path ? `aprel_${path}` : '';
+  }
+
+  return '';
+}
+
+async function getSyncServerOrigin() {
+  const stored = await chrome.storage.local.get(['syncServerUrl']);
+  const raw = String(stored.syncServerUrl || VIBIX_SYNC_WS_ORIGIN).trim();
+  return raw.split('?')[0].replace(/\/$/, '') || VIBIX_SYNC_WS_ORIGIN;
+}
+
+async function getPlayerSyncClientId() {
+  const stored = await chrome.storage.local.get(['watchpartyClientId', 'playerSyncClientId']);
+  let clientId = stored.watchpartyClientId || stored.playerSyncClientId;
+
+  if (!clientId) {
+    clientId = crypto.randomUUID
+      ? crypto.randomUUID()
+      : '10000000-1000-4000-8000-100000000000'.replace(/[018]/g, (c) =>
+          (
+            +c ^
+            (crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (+c / 4)))
+          ).toString(16)
+        );
+    await chrome.storage.local.set({
+      playerSyncClientId: clientId,
+      watchpartyClientId: clientId
+    });
+  }
+
+  return clientId;
+}
+
+async function ensurePlayerSyncApi(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'MAIN',
+    files: ['player-sync.js']
+  });
+}
+
+async function getFilmPlayerFrameId(tabId) {
+  const frames = await chrome.webNavigation.getAllFrames({ tabId });
+  const filmFrames = frames.filter(
+    (frame) =>
+      frame.url &&
+      (/https:\/\/aprelteam\.gokino\.by\//i.test(frame.url) ||
+        /https:\/\/(?:www\.)?gokino\.by\/matrix\//i.test(frame.url))
+  );
+
+  if (!filmFrames.length) {
+    return null;
+  }
+
+  return filmFrames[filmFrames.length - 1].frameId;
+}
+
+async function ensurePlayerBridge(tabId, frameId) {
+  await chrome.scripting.executeScript({
+    target: { tabId, frameIds: [frameId] },
+    world: 'MAIN',
+    files: ['player-bridge.js']
+  });
+}
+
+async function callPlayerSync(tabId, method, args = {}) {
+  await ensurePlayerSyncApi(tabId);
+  const wsOrigin = await getSyncServerOrigin();
+
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'MAIN',
+    func: (syncMethod, syncArgs, syncWsOrigin) => {
+      const api = window.RYH_PlayerSync;
+      if (!api) {
+        return { ok: false, error: 'Модуль синхронизации недоступен' };
+      }
+
+      const overlayFrame = document
+        .getElementById('ryh-player-overlay')
+        ?.querySelector('.ryh-player-frame');
+
+      if (syncMethod === 'connect') {
+        return api.connect({
+          roomId: syncArgs.roomId,
+          username: syncArgs.username || syncArgs.clientId,
+          wsOrigin: syncWsOrigin
+        });
+      }
+
+      if (syncMethod === 'disconnect') {
+        return api.disconnect();
+      }
+
+      if (syncMethod === 'broadcastSeek') {
+        return api.broadcastSeek(syncArgs.time);
+      }
+
+      if (syncMethod === 'broadcastSeekDelta') {
+        overlayFrame?.contentWindow?.postMessage(
+          {
+            source: 'ryh-player-sync-bridge',
+            command: 'seek_delta',
+            delta: syncArgs.delta
+          },
+          '*'
+        );
+        return api.broadcastSeekDelta(syncArgs.delta);
+      }
+
+      if (syncMethod === 'getState') {
+        return { ok: true, state: api.getState() };
+      }
+
+      return { ok: false, error: 'Неизвестное действие синхронизации' };
+    },
+    args: [method, args, wsOrigin]
+  });
+
+  return result?.result || { ok: false, error: 'Нет ответа от модуля синхронизации' };
+}
+
+async function joinPlayerSyncInTab(tabId, { service, filmId }) {
+  const roomId = buildSyncRoomId(service, filmId);
+  if (!roomId) {
+    throw new Error('Не удалось сформировать комнату синхронизации');
+  }
+
+  for (let attempt = 0; attempt < 24; attempt += 1) {
+    const frameId = await getFilmPlayerFrameId(tabId);
+    if (frameId !== null) {
+      await ensurePlayerBridge(tabId, frameId);
+      break;
+    }
+    if (attempt < 23) {
+      await sleepMs(500);
+    }
+  }
+
+  const clientId = await getPlayerSyncClientId();
+  const result = await callPlayerSync(tabId, 'connect', {
+    roomId,
+    username: `ryh_${clientId.slice(0, 8)}`,
+    clientId
+  });
+  if (!result.ok) {
+    throw new Error(result.error || 'Не удалось подключиться к синхронизации');
+  }
+
+  return { ok: true, roomId, clientId, connected: true };
+}
+
+async function leavePlayerSyncInTab(tabId) {
+  try {
+    await callPlayerSync(tabId, 'disconnect');
+  } catch {
+    /* ignore */
+  }
+
+  return { ok: true };
+}
+
+async function playerSyncSeekDeltaInTab(tabId, delta) {
+  await callPlayerSync(tabId, 'broadcastSeekDelta', { delta: Number(delta) });
+  await sleepMs(180);
+
+  const frameId = await getFilmPlayerFrameId(tabId);
+  if (frameId !== null) {
+    const [timeResult] = await chrome.scripting.executeScript({
+      target: { tabId, frameIds: [frameId] },
+      world: 'MAIN',
+      func: () => {
+        const time = window.RYH_PlayerBridge?.getCurrentTime?.();
+        return typeof time === 'number' ? time : null;
+      }
+    });
+
+    if (typeof timeResult?.result === 'number') {
+      return callPlayerSync(tabId, 'broadcastSeek', { time: timeResult.result });
+    }
+  }
+
+  return { ok: true };
+}
+
+async function getPlayerSyncStateInTab(tabId) {
+  const result = await callPlayerSync(tabId, 'getState');
+  return {
+    ok: true,
+    ...(result.state || { connected: false, roomId: '', clientId: '' })
+  };
+}
+
 async function isolateVibixInTab(tabId) {
   if (vibixIsolateInFlight) {
     vibixIsolateQueued = true;
@@ -1007,6 +1218,26 @@ function parseAprelSearchResults(html) {
   return movies;
 }
 
+function isAprelFilmPageUrl(url, pageUrl) {
+  const resolved = String(url || '').trim();
+  if (!resolved) {
+    return false;
+  }
+  if (pageUrl && resolved === String(pageUrl).trim()) {
+    return true;
+  }
+  return /aprelteam\.gokino\.by\/(?:films|serials|mults|anime|nocategory)\/[^?#]+\.html/i.test(
+    resolved
+  );
+}
+
+function pickAprelEmbedPlayer(players, pageUrl) {
+  const embedPlayer = players.find(
+    (player) => player?.url && !isAprelFilmPageUrl(player.url, pageUrl)
+  );
+  return embedPlayer || players[0] || null;
+}
+
 function parseAprelPlayers(html, pageUrl) {
   const players = [];
   const selectMatch = html.match(/<select id="player-select"[\s\S]*?<\/select>/i);
@@ -1019,7 +1250,10 @@ function parseAprelPlayers(html, pageUrl) {
     while ((optionMatch = optionPattern.exec(selectMatch[0])) !== null) {
       const url = resolveAprelPlayerUrl(optionMatch[1], pageUrl);
       const name = decodeHtmlEntities(optionMatch[2].replace(/<[^>]+>/g, '').trim());
-      if (!url) {
+      if (!url || !name || /выбор/i.test(name)) {
+        continue;
+      }
+      if (isAprelFilmPageUrl(url, pageUrl)) {
         continue;
       }
 
@@ -1074,7 +1308,10 @@ async function getAprelPlayerEmbed(filmId) {
   const titleMatch = html.match(/<title>([^<]+)<\/title>/);
   const title = titleMatch ? decodeHtmlEntities(titleMatch[1].trim()) : `Фильм ${filmPath}`;
   const players = parseAprelPlayers(html, pageUrl);
-  const defaultPlayer = players[0];
+  const defaultPlayer = pickAprelEmbedPlayer(players, pageUrl);
+  if (!defaultPlayer?.url || isAprelFilmPageUrl(defaultPlayer.url, pageUrl)) {
+    throw new Error('Не удалось найти embed-плеер Aprel для этого фильма');
+  }
 
   return {
     filmId: filmPath,
@@ -1309,6 +1546,61 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await clearYoutubeSessionIfNoLiveTab();
         sendResponse({ ok: true, joined: false, roomId: null, roomUrl: '' });
       })
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === 'joinPlayerSync') {
+    const tabId = message.tabId || sender.tab?.id;
+    if (!tabId) {
+      sendResponse({ ok: false, error: 'Вкладка не найдена' });
+      return false;
+    }
+
+    joinPlayerSyncInTab(tabId, {
+      service: message.service,
+      filmId: message.filmId
+    })
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === 'leavePlayerSync') {
+    const tabId = message.tabId || sender.tab?.id;
+    if (!tabId) {
+      sendResponse({ ok: false, error: 'Вкладка не найдена' });
+      return false;
+    }
+
+    leavePlayerSyncInTab(tabId)
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === 'playerSyncSeekDelta') {
+    const tabId = message.tabId || sender.tab?.id;
+    if (!tabId) {
+      sendResponse({ ok: false, error: 'Вкладка не найдена' });
+      return false;
+    }
+
+    playerSyncSeekDeltaInTab(tabId, message.delta)
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === 'getPlayerSyncState') {
+    const tabId = message.tabId || sender.tab?.id;
+    if (!tabId) {
+      sendResponse({ ok: false, error: 'Вкладка не найдена' });
+      return false;
+    }
+
+    getPlayerSyncStateInTab(tabId)
+      .then((result) => sendResponse(result))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   }

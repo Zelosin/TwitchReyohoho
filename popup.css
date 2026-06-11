@@ -287,6 +287,28 @@ input[type='text']:focus {
   gap: 8px;
 }
 
+.sync-toggle-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #adadb8;
+  cursor: pointer;
+  user-select: none;
+}
+
+.sync-toggle-wrap.hidden {
+  display: none;
+}
+
+.sync-toggle-wrap input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: #9147ff;
+  cursor: pointer;
+}
+
 .youtube-action-row {
   display: flex;
   align-items: stretch;

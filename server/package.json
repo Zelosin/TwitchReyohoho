@@ -1,0 +1,13 @@
+{
+  "name": "twitch-reyohoho-sync-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "WebSocket sync server for Aprel/Matrix player rooms",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
