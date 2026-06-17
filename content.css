@@ -256,6 +256,16 @@
   pointer-events: none;
 }
 
+.ryh-chat-emote {
+  display: inline;
+  height: 2.275rem;
+  width: auto;
+  max-width: 100%;
+  vertical-align: middle;
+  margin: -0.13rem 0.13rem;
+  object-fit: contain;
+}
+
 .ryh-sync-wrap {
   display: flex;
   align-items: center;

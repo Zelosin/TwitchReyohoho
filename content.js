@@ -90,6 +90,43 @@
     /\bapr-((?:films|serials|mults|anime|nocategory)(?:--[a-z0-9-]+)+)\b/gi;
   const MATRIX_SHORT_PATTERN = /\bmtr-(\d{3,})\b/gi;
 
+  const CUSTOM_CHAT_EMOTES = [
+    {
+      names: ['Мартимор', 'Martimor', 'Марти', 'Marti'],
+      src: 'icons/nothere/marti.png',
+      alt: 'Марти'
+    },
+    {
+      names: ['mrtmrPAT'],
+      src: 'icons/nothere/mrtmrPAT.gif',
+      alt: 'mrtmrPAT'
+    }
+  ];
+
+  const CUSTOM_EMOTE_BOUNDARY = '(?<![A-Za-zА-Яа-яЁё0-9_])';
+  const CUSTOM_EMOTE_BOUNDARY_END = '(?![A-Za-zА-Яа-яЁё0-9_])';
+
+  let customEmotePattern = null;
+  const customEmoteLookup = new Map();
+
+  (function initCustomEmotePattern() {
+    const names = [];
+
+    CUSTOM_CHAT_EMOTES.forEach((emote) => {
+      emote.names.forEach((name) => {
+        customEmoteLookup.set(name.toLowerCase(), emote);
+        names.push(name);
+      });
+    });
+
+    names.sort((left, right) => right.length - left.length);
+    const escapedNames = names.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    customEmotePattern = new RegExp(
+      `${CUSTOM_EMOTE_BOUNDARY}(${escapedNames.join('|')})${CUSTOM_EMOTE_BOUNDARY_END}`,
+      'gi'
+    );
+  })();
+
   const APREL_PATH_CATEGORIES = ['films', 'serials', 'mults', 'anime', 'nocategory'];
 
   const SERVICE_LABELS = {
@@ -1706,6 +1743,31 @@
     return best;
   }
 
+  function extractCustomEmoteFromText(text) {
+    if (!text || !customEmotePattern) {
+      return null;
+    }
+
+    customEmotePattern.lastIndex = 0;
+    const match = customEmotePattern.exec(text);
+    if (!match) {
+      return null;
+    }
+
+    const fullMatch = match[1];
+    const emote = customEmoteLookup.get(fullMatch.toLowerCase());
+    if (!emote) {
+      return null;
+    }
+
+    return {
+      fullMatch,
+      index: match.index,
+      src: emote.src,
+      alt: emote.alt || fullMatch
+    };
+  }
+
   function markElementAsChatLink(element, linkInfo) {
     if (!element || element.classList.contains('ryh-chat-link')) {
       return;
@@ -1789,6 +1851,16 @@
         const extracted = extractChatLinkFromText(text);
         if (extracted) {
           wrapLinkInTextNode(textNode, extracted);
+          return;
+        }
+
+        if (!isEmoteableTextNode(textNode)) {
+          return;
+        }
+
+        const emote = extractCustomEmoteFromText(text);
+        if (emote) {
+          wrapEmoteInTextNode(textNode, emote);
         }
       });
     });
@@ -1853,6 +1925,17 @@
     return true;
   }
 
+  function isEmoteableTextNode(textNode) {
+    const parent = textNode.parentElement;
+    if (!parent) {
+      return false;
+    }
+    if (parent.closest('.ryh-chat-emote, img')) {
+      return false;
+    }
+    return true;
+  }
+
   function wrapLinkInTextNode(textNode, linkInfo) {
     const parent = textNode.parentElement;
     if (!parent || parent.closest('.ryh-chat-link')) {
@@ -1887,6 +1970,39 @@
       fragment.appendChild(document.createTextNode(before));
     }
     fragment.appendChild(link);
+    if (after) {
+      fragment.appendChild(document.createTextNode(after));
+    }
+
+    parent.replaceChild(fragment, textNode);
+  }
+
+  function wrapEmoteInTextNode(textNode, emoteInfo) {
+    const parent = textNode.parentElement;
+    if (!parent || parent.closest('.ryh-chat-emote, img, .ryh-chat-link')) {
+      return;
+    }
+
+    const text = textNode.textContent;
+    const index = text.indexOf(emoteInfo.fullMatch, emoteInfo.index);
+    if (index === -1) {
+      return;
+    }
+
+    const before = text.slice(0, index);
+    const after = text.slice(index + emoteInfo.fullMatch.length);
+
+    const img = document.createElement('img');
+    img.className = 'ryh-chat-emote chat-line__message--emote';
+    img.src = chrome.runtime.getURL(emoteInfo.src);
+    img.alt = emoteInfo.alt;
+    img.title = emoteInfo.fullMatch;
+
+    const fragment = document.createDocumentFragment();
+    if (before) {
+      fragment.appendChild(document.createTextNode(before));
+    }
+    fragment.appendChild(img);
     if (after) {
       fragment.appendChild(document.createTextNode(after));
     }

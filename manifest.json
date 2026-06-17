@@ -134,7 +134,31 @@
 
     "128": "icons/icon128.png"
 
-  }
+  },
+
+  "web_accessible_resources": [
+
+    {
+
+      "resources": [
+
+        "icons/nothere/marti.png",
+
+        "icons/nothere/mrtmrPAT.gif"
+
+      ],
+
+      "matches": [
+
+        "https://www.twitch.tv/*",
+
+        "https://twitch.tv/*"
+
+      ]
+
+    }
+
+  ]
 
 }
 
