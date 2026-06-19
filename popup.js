@@ -304,7 +304,8 @@ async function runtimeMessage(payload) {
       message = 'Расширение было обновлено. Обновите страницу Twitch (F5).';
     } else if (message === 'Failed to fetch') {
       const messages = {
-        matrix: 'Не удалось подключиться к gokino.by. Проверьте интернет и обновите расширение.',
+        matrix:
+          'Не удалось подключиться к gokino.by / matrix.gokino.by. Проверьте интернет и обновите расширение.',
         aprel:
           'Не удалось подключиться к aprelteam.gokino.by. Проверьте интернет и обновите расширение.',
         reyohoho:

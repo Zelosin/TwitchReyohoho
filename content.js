@@ -80,6 +80,11 @@
       pattern: /https?:\/\/(?:www\.)?gokino\.by\/matrix\/search\.php\?(?:[^#\s]*&)?q=(\d+)/gi
     },
     {
+      type: 'film',
+      service: 'matrix',
+      pattern: /https?:\/\/(?:www\.)?matrix\.gokino\.by\/\?(?:[^#\s]*&)?q=(\d+)/gi
+    },
+    {
       type: 'watchparty',
       pattern: /https?:\/\/(?:www\.)?watchparty\.me\/watch\/([a-z0-9-]+)/gi
     }
@@ -413,6 +418,10 @@
 
       const path = parsed.pathname.toLowerCase();
       if (/\/matrix\/search\.php/i.test(path)) {
+        return true;
+      }
+
+      if (host === 'matrix.gokino.by' && parsed.searchParams.has('q')) {
         return true;
       }
 
@@ -1614,7 +1623,10 @@
   }
 
   function markMatrixAnchors(root) {
-    deepQueryAll(root, 'a[href*="gokino.by/matrix/search.php"]').forEach((anchor) => {
+    deepQueryAll(
+      root,
+      'a[href*="gokino.by/matrix/search.php"], a[href*="matrix.gokino.by/?q="], a[href*="matrix.gokino.by?"]'
+    ).forEach((anchor) => {
       if (anchor.classList.contains('ryh-chat-link')) {
         return;
       }

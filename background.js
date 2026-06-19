@@ -4,6 +4,7 @@ const REYOHOHO_ORIGIN = 'https://reyohoho.com';
 const REYOHOHO_ORIGINS = ['https://reyohoho.com', 'https://www.reyohoho.com'];
 const APREL_ORIGIN = 'https://aprelteam.gokino.by';
 const MATRIX_ORIGIN = 'https://gokino.by';
+const MATRIX_FALLBACK_ORIGIN = 'https://matrix.gokino.by';
 const VIBIX_SYNC_WS_ORIGIN = 'wss://sync.videoframe2.com';
 
 const FETCH_HEADERS = {
@@ -179,6 +180,7 @@ function normalizeKinopoiskId(filmId) {
   const raw = String(filmId || '')
     .trim()
     .replace(/^https?:\/\/(?:www\.)?gokino\.by\/matrix\/search\.php\?(?:[^#]*&)?q=/i, '')
+    .replace(/^https?:\/\/(?:www\.)?matrix\.gokino\.by\/\?(?:[^#]*&)?q=/i, '')
     .replace(/[^\d].*$/, '');
 
   if (!/^\d{3,}$/.test(raw)) {
@@ -192,29 +194,47 @@ function matrixPageUrlFromKpId(kpId) {
   return `${MATRIX_ORIGIN}/matrix/search.php?q=${kpId}`;
 }
 
-async function fetchMatrixHtml(path) {
-  try {
-    const response = await fetch(`${MATRIX_ORIGIN}${path}`, {
-      method: 'GET',
-      headers: FETCH_HEADERS,
-      redirect: 'follow',
-      credentials: 'omit',
-      cache: 'no-store'
-    });
+function getMatrixFetchUrls(kpId) {
+  return [
+    matrixPageUrlFromKpId(kpId),
+    `${MATRIX_FALLBACK_ORIGIN}/?q=${kpId}`
+  ];
+}
 
-    if (!response.ok) {
-      throw new Error(`Ошибка запроса: ${response.status}`);
-    }
+async function fetchMatrixHtml(kpId) {
+  let lastError = null;
 
-    return response.text();
-  } catch (error) {
-    if (error?.message === 'Failed to fetch') {
-      throw new Error(
-        'Не удалось подключиться к gokino.by. Проверьте интернет и обновите расширение.'
-      );
+  for (const pageUrl of getMatrixFetchUrls(kpId)) {
+    try {
+      const response = await fetch(pageUrl, {
+        method: 'GET',
+        headers: FETCH_HEADERS,
+        redirect: 'follow',
+        credentials: 'omit',
+        cache: 'no-store'
+      });
+
+      if (!response.ok) {
+        lastError = new Error(`Ошибка запроса: ${response.status}`);
+        continue;
+      }
+
+      return {
+        html: await response.text(),
+        pageUrl
+      };
+    } catch (error) {
+      lastError = error;
     }
-    throw error;
   }
+
+  if (lastError?.message === 'Failed to fetch') {
+    throw new Error(
+      'Не удалось подключиться к gokino.by / matrix.gokino.by. Проверьте интернет и обновите расширение.'
+    );
+  }
+
+  throw lastError || new Error('Не удалось загрузить Matrix');
 }
 
 function resolveMatrixPlayerUrl(url, pageUrl) {
@@ -226,7 +246,13 @@ function resolveMatrixPlayerUrl(url, pageUrl) {
   if (resolved.startsWith('//')) {
     resolved = `https:${resolved}`;
   } else if (resolved.startsWith('/')) {
-    resolved = `${MATRIX_ORIGIN}${resolved}`;
+    let pageOrigin = MATRIX_ORIGIN;
+    try {
+      pageOrigin = new URL(pageUrl).origin;
+    } catch {
+      /* keep default */
+    }
+    resolved = `${pageOrigin}${resolved}`;
   }
 
   return resolved;
@@ -361,8 +387,7 @@ function parseMatrixPlayers(html, kpId, pageUrl) {
 
 async function getMatrixPlayerEmbed(filmId) {
   const kpId = normalizeKinopoiskId(filmId);
-  const pageUrl = matrixPageUrlFromKpId(kpId);
-  const html = await fetchMatrixHtml(`/matrix/search.php?q=${kpId}`);
+  const { html, pageUrl } = await fetchMatrixHtml(kpId);
   const titleMatch =
     html.match(/Фильм по ID\s*(\d+)/i) ||
     html.match(/<h1[^>]*>([^<]*ID[^<]*\d+[^<]*)<\/h1>/i) ||
@@ -889,7 +914,8 @@ async function getOverlayPlayerFrameIds(tabId) {
       if (
         frame.url &&
         (/https:\/\/aprelteam\.gokino\.by\//i.test(frame.url) ||
-          /https:\/\/(?:www\.)?gokino\.by\/matrix\//i.test(frame.url))
+          /https:\/\/(?:www\.)?gokino\.by\/matrix\//i.test(frame.url) ||
+          /https:\/\/(?:www\.)?matrix\.gokino\.by\//i.test(frame.url))
       ) {
         roots.push(frame.frameId);
       }
