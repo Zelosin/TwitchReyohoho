@@ -94,6 +94,7 @@
   const APREL_SHORT_PATTERN =
     /\bapr-((?:films|serials|mults|anime|nocategory)(?:--[a-z0-9-]+)+)\b/gi;
   const MATRIX_SHORT_PATTERN = /\bmtr-(\d{3,})\b/gi;
+  const TTW_SHORT_PATTERN = /\bttw-([a-z0-9_]{4,25})\b/gi;
 
   const CUSTOM_CHAT_EMOTES = [
     {
@@ -1210,6 +1211,133 @@
     }
   }
 
+  function buildTwitchEmbedUrl(channel) {
+    const normalizedChannel = String(channel || '')
+      .trim()
+      .toLowerCase();
+    const params = new URLSearchParams({
+      channel: normalizedChannel,
+      parent: window.location.hostname,
+      autoplay: 'true'
+    });
+
+    ['www.twitch.tv', 'twitch.tv'].forEach((host) => {
+      if (host !== window.location.hostname) {
+        params.append('parent', host);
+      }
+    });
+
+    return `https://player.twitch.tv/?${params.toString()}`;
+  }
+
+  function createTwitchOverlay(container, { channel, title, embedUrl }) {
+    removeOverlay();
+
+    const computed = window.getComputedStyle(container);
+    if (computed.position === 'static') {
+      container.style.position = 'relative';
+    }
+
+    const resolvedEmbedUrl = embedUrl || buildTwitchEmbedUrl(channel);
+    const overlay = document.createElement('div');
+    overlay.id = OVERLAY_ID;
+    overlay.className = 'ryh-player-overlay ryh-twitch-overlay';
+    overlay.innerHTML = `
+      <div class="ryh-player-bar">
+        <span class="ryh-player-title">${escapeHtml(title || channel)}</span>
+        <div class="ryh-bar-actions">
+          <button type="button" class="ryh-restore-btn" title="Вернуть Twitch" aria-label="Вернуть Twitch"><span aria-hidden="true">×</span></button>
+        </div>
+      </div>
+      <div class="ryh-player-body">
+        <iframe
+          class="ryh-player-frame ryh-twitch-frame"
+          src="${escapeHtml(resolvedEmbedUrl)}"
+          allowfullscreen
+          allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
+          referrerpolicy="origin"
+        ></iframe>
+      </div>
+    `;
+
+    overlay.querySelector('.ryh-restore-btn').addEventListener('click', () => {
+      restorePlayer();
+    });
+
+    bindAutoHideControls(overlay);
+    container.appendChild(overlay);
+    pauseTwitchVideo();
+  }
+
+  async function replaceTwitchPlayer({ channel }) {
+    cancelPendingPlayerLoads();
+
+    const normalizedChannel = String(channel || '')
+      .trim()
+      .toLowerCase();
+    if (!/^[a-z0-9_]{4,25}$/.test(normalizedChannel)) {
+      return { ok: false, error: 'Некорректное имя канала Twitch' };
+    }
+
+    if (
+      playerState.active &&
+      playerState.mode === 'twitch' &&
+      playerState.filmId === normalizedChannel
+    ) {
+      return { ok: true, channel: normalizedChannel, title: playerState.title };
+    }
+
+    let container = findPlayerContainer();
+    if (!container) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      container = findPlayerContainer();
+    }
+
+    if (!container) {
+      return { ok: false, error: 'Плеер Twitch не найден. Обновите страницу.' };
+    }
+
+    await disconnectWatchParty();
+
+    if (playerState.mode === 'youtube') {
+      await sendRuntimeMessage({ type: 'clearYoutubeRoom' }).catch(() => {});
+    }
+
+    if (syncBridgeTimer) {
+      clearTimeout(syncBridgeTimer);
+      syncBridgeTimer = null;
+    }
+    await leavePlayerSync();
+
+    const embedUrl = buildTwitchEmbedUrl(normalizedChannel);
+    const pageUrl = `https://www.twitch.tv/${normalizedChannel}`;
+
+    createTwitchOverlay(container, {
+      channel: normalizedChannel,
+      title: normalizedChannel,
+      embedUrl
+    });
+
+    playerState = {
+      active: true,
+      mode: 'twitch',
+      filmId: normalizedChannel,
+      title: normalizedChannel,
+      embedUrl,
+      pageUrl,
+      roomId: '',
+      roomUrl: '',
+      players: [],
+      activePlayerId: '',
+      syncEnabled: false,
+      syncViewerCount: 0
+    };
+
+    await storageSet({ playerState, playerSyncEnabled: false });
+
+    return { ok: true, channel: normalizedChannel, title: playerState.title };
+  }
+
   function escapeHtml(text) {
     return String(text)
       .replace(/&/g, '&amp;')
@@ -1459,6 +1587,10 @@
     });
   }
 
+  async function loadTwitchChannel(channel) {
+    return replaceTwitchPlayer({ channel });
+  }
+
   function deepQueryAll(root, selector) {
     const results = [];
     if (!root) {
@@ -1549,7 +1681,8 @@
         const filmId = target.dataset.filmId;
         const filmService = target.dataset.filmService;
         const roomSlug = target.dataset.roomSlug;
-        if (!filmId && !roomSlug) {
+        const twitchChannel = target.dataset.twitchChannel;
+        if (!filmId && !roomSlug && !twitchChannel) {
           return;
         }
 
@@ -1569,6 +1702,11 @@
               const result = await loadFilmById(linkFilmId, linkService);
               if (!result?.ok) {
                 console.warn('[RYH] Не удалось загрузить фильм:', result?.error);
+              }
+            } else if (twitchChannel) {
+              const result = await loadTwitchChannel(twitchChannel);
+              if (!result?.ok) {
+                console.warn('[RYH] Не удалось переключить канал:', result?.error);
               }
             } else {
               await loadWatchPartyRoom(roomSlug);
@@ -1697,6 +1835,22 @@
     };
   }
 
+  function parseTtwShortLink(match) {
+    const channel = match[1].toLowerCase();
+    if (!/^[a-z0-9_]{4,25}$/.test(channel)) {
+      return null;
+    }
+
+    return {
+      type: 'twitch',
+      fullMatch: match[0],
+      index: match.index,
+      channel,
+      filmId: null,
+      slug: null
+    };
+  }
+
   function extractChatLinkFromText(text) {
     if (!text) {
       return null;
@@ -1752,6 +1906,15 @@
       }
     }
 
+    TTW_SHORT_PATTERN.lastIndex = 0;
+    const ttwMatch = TTW_SHORT_PATTERN.exec(text);
+    if (ttwMatch) {
+      const item = parseTtwShortLink(ttwMatch);
+      if (item && (!best || item.index < best.index)) {
+        best = item;
+      }
+    }
+
     return best;
   }
 
@@ -1792,6 +1955,12 @@
       element.dataset.filmId = linkInfo.filmId;
       element.dataset.filmService = linkInfo.service || 'reyohoho';
       element.title = `Смотреть на ${getServiceLabel(linkInfo.service || 'reyohoho')} (${linkInfo.filmId})`;
+      return;
+    }
+
+    if (linkInfo.type === 'twitch') {
+      element.dataset.twitchChannel = linkInfo.channel;
+      element.title = `Смотреть канал Twitch: ${linkInfo.channel}`;
       return;
     }
 
@@ -1972,6 +2141,9 @@
       link.dataset.filmId = linkInfo.filmId;
       link.dataset.filmService = linkInfo.service || 'reyohoho';
       link.title = `Смотреть на ${getServiceLabel(linkInfo.service || 'reyohoho')} (${linkInfo.filmId})`;
+    } else if (linkInfo.type === 'twitch') {
+      link.dataset.twitchChannel = linkInfo.channel;
+      link.title = `Смотреть канал Twitch: ${linkInfo.channel}`;
     } else {
       link.dataset.roomSlug = linkInfo.slug;
       link.title = `Присоединиться к WatchParty (${linkInfo.slug})`;
@@ -2049,6 +2221,13 @@
       return true;
     }
 
+    if (message.type === 'replaceTwitchPlayer') {
+      replaceTwitchPlayer(message)
+        .then(sendResponse)
+        .catch((error) => sendResponse({ ok: false, error: error.message }));
+      return true;
+    }
+
     if (message.type === 'restorePlayer') {
       restorePlayer()
         .then(sendResponse)
@@ -2106,11 +2285,45 @@
       return true;
     }
 
+    if (message.type === 'loadTwitchChannel') {
+      loadTwitchChannel(message.channel)
+        .then(sendResponse)
+        .catch((error) => sendResponse({ ok: false, error: error.message }));
+      return true;
+    }
+
     if (message.type === 'ping') {
       sendResponse({ ok: Boolean(ext().isExtensionContextValid?.()) });
       return false;
     }
   });
+
+  function restoreTwitchFromStorage(stored) {
+    playerState = stored.playerState;
+    const channel = String(playerState.filmId || '').trim().toLowerCase();
+    if (!channel) {
+      return;
+    }
+
+    const embedUrl = playerState.embedUrl || buildTwitchEmbedUrl(channel);
+
+    const tryRestore = (attempt = 0) => {
+      const container = findPlayerContainer();
+      if (container) {
+        createTwitchOverlay(container, {
+          channel,
+          title: playerState.title || channel,
+          embedUrl
+        });
+        return;
+      }
+      if (attempt < 20) {
+        setTimeout(() => tryRestore(attempt + 1), 500);
+      }
+    };
+
+    tryRestore();
+  }
 
   function restoreYoutubeFromStorage(stored) {
     playerState = stored.playerState;
@@ -2153,6 +2366,11 @@
 
       if (stored.playerState.mode === 'youtube') {
         restoreYoutubeFromStorage(stored);
+        return;
+      }
+
+      if (stored.playerState.mode === 'twitch') {
+        restoreTwitchFromStorage(stored);
         return;
       }
 

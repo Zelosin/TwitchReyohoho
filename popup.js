@@ -109,8 +109,18 @@ function setYoutubeActive(active, roomUrl = '', roomId = '') {
   clearYoutubeRoomSelection();
 }
 
+function setTwitchActive(active, channel = '') {
+  statusBadge.textContent = active ? channel || 'Twitch' : 'Twitch';
+  statusBadge.className = `badge${active ? ' active twitch' : ''}`;
+  restoreBtn.classList.toggle('hidden', !active);
+  updateSyncToggleUi(false, 'twitch', false);
+  if (active) {
+    clearYoutubeRoomSelection();
+  }
+}
+
 function applyFilmFromPlayerState(state) {
-  if (!state?.filmId) {
+  if (!state?.filmId || state.mode === 'youtube' || state.mode === 'twitch') {
     return;
   }
 
@@ -641,6 +651,8 @@ restoreBtn.addEventListener('click', async () => {
       if (stateResponse?.mode === 'youtube') {
         await runtimeMessage({ type: 'clearYoutubeRoom' });
         setYoutubeActive(false);
+      } else if (stateResponse?.mode === 'twitch') {
+        setTwitchActive(false);
       } else {
         setFilmActive(false, stateResponse?.mode === 'aprel' ? 'aprel' : stateResponse?.mode === 'matrix' ? 'matrix' : 'reyohoho');
       }
@@ -679,6 +691,11 @@ async function syncState() {
           : '',
         'success'
       );
+    } else if (response?.active && response.mode === 'twitch') {
+      activePlayerFilmId = null;
+      clearYoutubeRoomSelection();
+      setTwitchActive(true, response.title || response.filmId);
+      showMessage(response.title ? `Сейчас: ${response.title}` : '', 'success');
     } else if (response?.active && response.filmId) {
       clearYoutubeRoomSelection();
       const service =
