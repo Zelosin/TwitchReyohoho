@@ -2022,8 +2022,40 @@
     parent.replaceChild(fragment, textNode);
   }
 
+  function insertTextIntoTwitchChat(text) {
+    const value = String(text || '');
+    if (!value) {
+      return false;
+    }
+
+    // Мост в MAIN world (shadow-open.js): attribute + Event, без CustomEvent.detail.
+    document.documentElement.setAttribute('data-ryh-insert-chat', value);
+    document.documentElement.dispatchEvent(new Event('ryh-insert-chat-text'));
+    return true;
+  }
+
+  function initMrtmrPatHotkey() {
+    document.addEventListener(
+      'keydown',
+      (event) => {
+        if (!event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) {
+          return;
+        }
+        if (event.code !== 'KeyM') {
+          return;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+        insertTextIntoTwitchChat('mrtmrPAT');
+      },
+      true
+    );
+  }
+
   function initChatObserver() {
     initChatClickDelegation();
+    initMrtmrPatHotkey();
     observeChatRoot(document.body);
     attachChatObservers(document.body);
     scanAllChatLinks();
