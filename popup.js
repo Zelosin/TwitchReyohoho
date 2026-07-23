@@ -58,8 +58,8 @@ function updateServiceUi() {
   logoText.textContent = getServiceLabel();
   logoText.classList.toggle('aprel', isAprel);
   logoText.classList.toggle('matrix', isMatrix);
-  searchLabel.textContent = isMatrix ? 'ID Кинопоиска' : 'Поиск фильма';
-  searchInput.placeholder = isMatrix ? 'Например: 46959' : 'Название фильма...';
+  searchLabel.textContent = isMatrix ? 'ID Кинопоиска / IMDb' : 'Поиск фильма';
+  searchInput.placeholder = isMatrix ? '46959 или tt0468569' : 'Название фильма...';
   updateReplaceButton();
 }
 
@@ -495,23 +495,82 @@ serviceMatrixBtn.addEventListener('click', () => {
   }
 });
 
-function handleMatrixInput(rawValue) {
-  const kpId = String(rawValue || '').trim();
-  if (!/^\d{3,}$/.test(kpId)) {
+function parseMatrixInputRef(rawValue) {
+  const raw = String(rawValue || '').trim();
+  const imdbFromUrl = raw.match(/imdb\.com\/title\/(tt\d{7,8})/i);
+  if (imdbFromUrl) {
+    return { type: 'imdb', id: imdbFromUrl[1].toLowerCase() };
+  }
+  if (/^tt\d{7,8}$/i.test(raw)) {
+    return { type: 'imdb', id: raw.toLowerCase() };
+  }
+  if (/^\d{3,}$/.test(raw)) {
+    return { type: 'kp', id: raw };
+  }
+  return null;
+}
+
+let matrixResolveRequestId = 0;
+
+async function handleMatrixInput(rawValue) {
+  const ref = parseMatrixInputRef(rawValue);
+  if (!ref) {
     clearSelection();
     return;
   }
 
-  selectedFilm = {
-    id: kpId,
-    name: `Кинопоиск #${kpId}`,
-    year: '',
-    service: 'matrix'
-  };
-  selectedFilmTitle.textContent = selectedFilm.name;
-  selectedFilmEl.classList.remove('hidden');
+  if (ref.type === 'kp') {
+    selectedFilm = {
+      id: ref.id,
+      name: `Кинопоиск #${ref.id}`,
+      year: '',
+      service: 'matrix'
+    };
+    selectedFilmTitle.textContent = selectedFilm.name;
+    selectedFilmEl.classList.remove('hidden');
+    updateReplaceButton();
+    showMessage(`Нажмите «Заменить на ${getServiceLabel()}»`, '');
+    return;
+  }
+
+  const requestId = ++matrixResolveRequestId;
+  selectedFilm = null;
   updateReplaceButton();
-  showMessage(`Нажмите «Заменить на ${getServiceLabel()}»`, '');
+  selectedFilmEl.classList.add('hidden');
+  showMessage(`Ищем ${ref.id} на Кинопоиске...`, '');
+
+  try {
+    const response = await runtimeMessage({
+      type: 'resolveMatrixFilmId',
+      filmId: ref.id
+    });
+
+    if (requestId !== matrixResolveRequestId) {
+      return;
+    }
+
+    if (!response.ok || !response.kpId) {
+      throw new Error(response.error || 'Фильм не найден на Кинопоиске');
+    }
+
+    selectedFilm = {
+      id: response.kpId,
+      name: `Кинопоиск #${response.kpId}`,
+      year: '',
+      service: 'matrix',
+      imdbId: ref.id
+    };
+    selectedFilmTitle.textContent = `${selectedFilm.name} ← ${ref.id}`;
+    selectedFilmEl.classList.remove('hidden');
+    updateReplaceButton();
+    showMessage(`Нажмите «Заменить на ${getServiceLabel()}»`, '');
+  } catch (error) {
+    if (requestId !== matrixResolveRequestId) {
+      return;
+    }
+    clearSelection();
+    showMessage(error.message || 'Не удалось найти фильм по IMDb', 'error');
+  }
 }
 
 searchInput.addEventListener('input', () => {
@@ -522,10 +581,15 @@ searchInput.addEventListener('input', () => {
   if (videoService === 'matrix') {
     searchResults.classList.add('hidden');
     searchResults.innerHTML = '';
-    if (query.length >= 3) {
-      handleMatrixInput(query);
+    const ref = parseMatrixInputRef(query);
+    if (ref) {
+      searchTimer = setTimeout(() => {
+        handleMatrixInput(query);
+      }, SEARCH_DELAY_MS);
     } else {
-      showMessage(query.length ? 'ID Кинопоиска — минимум 3 цифры' : '');
+      showMessage(
+        query.length ? 'Введите ID Кинопоиска (цифры) или IMDb (tt…)' : ''
+      );
     }
     return;
   }

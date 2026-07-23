@@ -67,6 +67,26 @@
     '[data-a-target="chat-message-text"]'
   ];
 
+  const EMOTE_NAME_SELECTORS = [
+    // Ник в чате
+    '[data-a-target="chat-message-username"]',
+    '.chat-author__display-name',
+    '[data-a-target="chat-message-mention"]',
+    '.seventv-chat-user-username',
+    // Название / ник канала (актуальная вёрстка Twitch)
+    'h1.tw-title',
+    '.home-header-sticky h1',
+    '.channel-info-content h1',
+    '#offline-channel-main-content h1',
+    '#live-channel-stream-information h1',
+    '[data-a-target="channel-header-channel-link"]',
+    '[data-a-target="user-channel-header-item"]',
+    '[data-test-selector="user-display-name"]',
+    'div[class*="metadata-layout"] a[href^="/"] h1',
+    'div[class*="metadata-layout"] a[href^="/"] p',
+    'a[data-a-target="player-info-guest"]'
+  ];
+
   const CHAT_URL_PATTERNS = [
     { type: 'film', service: 'reyohoho', pattern: /https?:\/\/(?:www\.)?reyohoho\.com\/films\/(\d+)/gi },
     {
@@ -1876,6 +1896,9 @@
         }
       });
     });
+
+    // Ники в чате и название канала — вне обычного обхода сообщений
+    scanEmoteNameTargets(document.body);
   }
   function attachChatObservers(element) {
     if (!(element instanceof Element)) {
@@ -1942,7 +1965,7 @@
     if (!parent) {
       return false;
     }
-    if (parent.closest('.ryh-chat-emote, img')) {
+    if (parent.closest('.ryh-chat-emote, .ryh-channel-emote, img')) {
       return false;
     }
     return true;
@@ -1989,9 +2012,9 @@
     parent.replaceChild(fragment, textNode);
   }
 
-  function wrapEmoteInTextNode(textNode, emoteInfo) {
+  function wrapEmoteInTextNode(textNode, emoteInfo, emoteClassName = 'ryh-chat-emote') {
     const parent = textNode.parentElement;
-    if (!parent || parent.closest('.ryh-chat-emote, img, .ryh-chat-link')) {
+    if (!parent || parent.closest('.ryh-chat-emote, .ryh-channel-emote, img, .ryh-chat-link')) {
       return;
     }
 
@@ -2005,7 +2028,7 @@
     const after = text.slice(index + emoteInfo.fullMatch.length);
 
     const img = document.createElement('img');
-    img.className = 'ryh-chat-emote chat-line__message--emote';
+    img.className = `${emoteClassName} chat-line__message--emote`;
     img.src = chrome.runtime.getURL(emoteInfo.src);
     img.alt = emoteInfo.alt;
     img.title = emoteInfo.fullMatch;
@@ -2022,6 +2045,117 @@
     parent.replaceChild(fragment, textNode);
   }
 
+  function isChannelNameElement(element) {
+    return !element.closest(
+      '.stream-chat, [data-a-target="video-player-chat-room"], #chat-room, .chat-scrollable-area, .seventv-chat-list, .seventv-message-container, [data-a-target="chat-message-username"], .chat-author__display-name, [data-a-target="chat-message-mention"]'
+    );
+  }
+
+  function applyChannelNameEmote(element, emote) {
+    if (!element || !emote) {
+      return false;
+    }
+
+    const host = element.parentElement || element;
+    let img =
+      (element.nextElementSibling?.classList?.contains('ryh-channel-emote')
+        ? element.nextElementSibling
+        : null) ||
+      host.querySelector(':scope > .ryh-channel-emote');
+
+    if (!img) {
+      img = document.createElement('img');
+      img.className = 'ryh-channel-emote';
+      img.src = chrome.runtime.getURL(emote.src);
+      img.alt = emote.alt;
+      img.title = emote.fullMatch || emote.alt;
+      // Sibling рядом с h1 — React может перезаписать textContent h1, но sibling останется
+      element.insertAdjacentElement('afterend', img);
+    } else {
+      img.src = chrome.runtime.getURL(emote.src);
+      img.alt = emote.alt;
+      img.title = emote.fullMatch || emote.alt;
+      if (img.previousElementSibling !== element) {
+        element.insertAdjacentElement('afterend', img);
+      }
+    }
+
+    // На всякий случай убираем дубли в том же родителе
+    host.querySelectorAll(':scope > .ryh-channel-emote').forEach((node) => {
+      if (node !== img) {
+        node.remove();
+      }
+    });
+
+    element.classList.add('ryh-emote-hidden-text');
+    element.setAttribute('data-ryh-emote-name', emote.fullMatch || emote.alt);
+    element.setAttribute('aria-hidden', 'true');
+    // Inline !important — на случай, если styled-components перебьют класс
+    element.style.setProperty('position', 'absolute', 'important');
+    element.style.setProperty('width', '0', 'important');
+    element.style.setProperty('height', '0', 'important');
+    element.style.setProperty('overflow', 'hidden', 'important');
+    element.style.setProperty('opacity', '0', 'important');
+    element.style.setProperty('font-size', '0', 'important');
+    element.style.setProperty('line-height', '0', 'important');
+    element.style.setProperty('margin', '0', 'important');
+    element.style.setProperty('padding', '0', 'important');
+    return true;
+  }
+
+  function scanEmoteNameTargets(root = document.body) {
+    if (!root) {
+      return;
+    }
+
+    const seen = new Set();
+
+    EMOTE_NAME_SELECTORS.forEach((selector) => {
+      deepQueryAll(root, selector).forEach((element) => {
+        if (seen.has(element)) {
+          return;
+        }
+        seen.add(element);
+
+        const text = String(element.textContent || '').trim();
+        if (!text) {
+          return;
+        }
+
+        const emote = extractCustomEmoteFromText(text);
+        if (!emote) {
+          return;
+        }
+
+        // Для названия канала целиком (Martimor) — прячем текст и ставим img рядом,
+        // иначе React Twitch сразу откатывает замену text node.
+        if (isChannelNameElement(element) && text === emote.fullMatch) {
+          applyChannelNameEmote(element, emote);
+          return;
+        }
+
+        if (element.querySelector('.ryh-chat-emote, .ryh-channel-emote')) {
+          return;
+        }
+
+        const emoteClassName = isChannelNameElement(element)
+          ? 'ryh-channel-emote'
+          : 'ryh-chat-emote';
+
+        walkTextNodes(element, (textNode) => {
+          if (!isEmoteableTextNode(textNode)) {
+            return;
+          }
+
+          const nodeEmote = extractCustomEmoteFromText(textNode.textContent);
+          if (nodeEmote) {
+            wrapEmoteInTextNode(textNode, nodeEmote, emoteClassName);
+          }
+        });
+      });
+    });
+  }
+
   function insertTextIntoTwitchChat(text) {
     const value = String(text || '');
     if (!value) {
@@ -2032,6 +2166,200 @@
     document.documentElement.setAttribute('data-ryh-insert-chat', value);
     document.documentElement.dispatchEvent(new Event('ryh-insert-chat-text'));
     return true;
+  }
+
+  const RYH_FAVICON_ATTR = 'data-ryh-favicon';
+  let ryhFaviconActiveSrc = '';
+  let ryhFaviconObserver = null;
+  let ryhTitlePatched = false;
+  let ryhOriginalTitle = '';
+
+  function getTwitchChannelLogin() {
+    const path = String(location.pathname || '')
+      .replace(/^\/+|\/+$/g, '')
+      .split('/')[0];
+    if (!path) {
+      return '';
+    }
+    if (
+      /^(directory|videos|downloads|jobs|privacy|products|search|settings|subs|turbo|wallet|inventory|drops|prime|p|moderator|popout|embed)$/i.test(
+        path
+      )
+    ) {
+      return '';
+    }
+    return path.toLowerCase();
+  }
+
+  function findChannelFaviconEmote() {
+    const login = getTwitchChannelLogin();
+    if (login && customEmoteLookup.has(login)) {
+      return customEmoteLookup.get(login);
+    }
+
+    const titleMatch = String(document.title || '').match(/^(.+?)\s*-\s*Twitch\s*$/i);
+    const titleName = titleMatch?.[1]?.trim();
+    if (titleName) {
+      const fromTitle = customEmoteLookup.get(titleName.toLowerCase());
+      if (fromTitle) {
+        return fromTitle;
+      }
+    }
+
+    const heading = document.querySelector(
+      'h1.tw-title, .home-header-sticky h1, .channel-info-content h1, #live-channel-stream-information h1'
+    );
+    const headingText = heading?.textContent?.trim();
+    if (headingText && customEmoteLookup.has(headingText.toLowerCase())) {
+      return customEmoteLookup.get(headingText.toLowerCase());
+    }
+
+    return null;
+  }
+
+  function stripEmoteNamesFromTitle(title, emote) {
+    let next = String(title || '');
+    const names = [...(emote?.names || []), emote?.alt, emote?.fullMatch].filter(Boolean);
+    names
+      .sort((left, right) => String(right).length - String(left).length)
+      .forEach((name) => {
+        const escaped = String(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        next = next.replace(new RegExp(escaped, 'gi'), '');
+      });
+
+    next = next
+      .replace(/\s*[-|•·]\s*/g, ' - ')
+      .replace(/^\s*[-|•·]\s*|\s*[-|•·]\s*$/g, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+
+    return next || 'Twitch';
+  }
+
+  function applyChannelTabTitle(emote) {
+    const current = String(document.title || '');
+    const cleaned = stripEmoteNamesFromTitle(current, emote);
+    if (current === cleaned) {
+      return;
+    }
+
+    if (!ryhTitlePatched) {
+      ryhOriginalTitle = current;
+      ryhTitlePatched = true;
+    }
+    document.title = cleaned;
+  }
+
+  function restoreChannelTabTitle() {
+    if (!ryhTitlePatched) {
+      return;
+    }
+    if (ryhOriginalTitle) {
+      document.title = ryhOriginalTitle;
+    }
+    ryhTitlePatched = false;
+    ryhOriginalTitle = '';
+  }
+
+  function ensureFaviconLinks() {
+    const links = [
+      ...document.querySelectorAll("link[rel='icon'], link[rel='shortcut icon']")
+    ];
+    if (links.length) {
+      return links;
+    }
+
+    const link = document.createElement('link');
+    link.setAttribute('rel', 'icon');
+    document.head.appendChild(link);
+    return [link];
+  }
+
+  function restoreDefaultFavicon() {
+    if (!ryhFaviconActiveSrc) {
+      return;
+    }
+
+    document.querySelectorAll(`link[${RYH_FAVICON_ATTR}]`).forEach((link) => {
+      const original = link.getAttribute(RYH_FAVICON_ATTR);
+      if (original) {
+        link.href = original;
+      } else {
+        link.remove();
+      }
+      link.removeAttribute(RYH_FAVICON_ATTR);
+    });
+    ryhFaviconActiveSrc = '';
+  }
+
+  function applyChannelFavicon(emote) {
+    const href = chrome.runtime.getURL(emote.src);
+    if (ryhFaviconActiveSrc === href) {
+      // Twitch иногда возвращает свой favicon — подправляем
+      ensureFaviconLinks().forEach((link) => {
+        if (link.href !== href) {
+          if (!link.hasAttribute(RYH_FAVICON_ATTR)) {
+            link.setAttribute(RYH_FAVICON_ATTR, link.href || '');
+          }
+          link.href = href;
+          link.type = emote.src.endsWith('.gif') ? 'image/gif' : 'image/png';
+        }
+      });
+      return;
+    }
+
+    restoreDefaultFavicon();
+    ensureFaviconLinks().forEach((link) => {
+      if (!link.hasAttribute(RYH_FAVICON_ATTR)) {
+        link.setAttribute(RYH_FAVICON_ATTR, link.href || '');
+      }
+      link.href = href;
+      link.type = emote.src.endsWith('.gif') ? 'image/gif' : 'image/png';
+    });
+    ryhFaviconActiveSrc = href;
+  }
+
+  function updateChannelFavicon() {
+    const emote = findChannelFaviconEmote();
+    if (emote) {
+      applyChannelFavicon(emote);
+      applyChannelTabTitle(emote);
+    } else {
+      restoreDefaultFavicon();
+      restoreChannelTabTitle();
+    }
+  }
+
+  function initChannelFaviconWatcher() {
+    if (ryhFaviconObserver || !document.head) {
+      return;
+    }
+
+    ryhFaviconObserver = new MutationObserver(() => {
+      if (ryhFaviconActiveSrc || ryhTitlePatched) {
+        updateChannelFavicon();
+      }
+    });
+    ryhFaviconObserver.observe(document.head, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['href', 'rel']
+    });
+
+    // Twitch часто меняет title через JS
+    const titleEl = document.querySelector('title');
+    if (titleEl) {
+      ryhFaviconObserver.observe(titleEl, {
+        childList: true,
+        characterData: true,
+        subtree: true
+      });
+    }
+
+    window.addEventListener('popstate', () => {
+      setTimeout(updateChannelFavicon, 50);
+    });
   }
 
   function initMrtmrPatHotkey() {
@@ -2056,14 +2384,19 @@
   function initChatObserver() {
     initChatClickDelegation();
     initMrtmrPatHotkey();
+    initChannelFaviconWatcher();
     observeChatRoot(document.body);
     attachChatObservers(document.body);
     scanAllChatLinks();
+    updateChannelFavicon();
 
     if (chatScanInterval) {
       clearInterval(chatScanInterval);
     }
-    chatScanInterval = setInterval(scanAllChatLinks, 2000);
+    chatScanInterval = setInterval(() => {
+      scanAllChatLinks();
+      updateChannelFavicon();
+    }, 2000);
   }
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

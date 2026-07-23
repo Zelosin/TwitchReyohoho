@@ -266,6 +266,37 @@
   object-fit: contain;
 }
 
+/* Прячем оригинальный ник, даже если React снимет наш класс с h1 */
+h1:has(+ .ryh-channel-emote),
+h2:has(+ .ryh-channel-emote),
+p:has(+ .ryh-channel-emote),
+a:has(+ .ryh-channel-emote),
+.ryh-emote-hidden-text {
+  position: absolute !important;
+  width: 0 !important;
+  height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  border: 0 !important;
+  opacity: 0 !important;
+  font-size: 0 !important;
+  line-height: 0 !important;
+  color: transparent !important;
+  pointer-events: none !important;
+}
+
+.ryh-channel-emote {
+  display: inline-block !important;
+  height: 2rem !important;
+  width: auto !important;
+  max-width: 14rem !important;
+  vertical-align: middle !important;
+  margin: 0 !important;
+  object-fit: contain !important;
+}
+
 .ryh-sync-wrap {
   display: flex;
   align-items: center;

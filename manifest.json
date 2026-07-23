@@ -56,7 +56,11 @@
 
     "https://*.kinobox.tv/*",
 
-    "https://*.hdrezka.me/*"
+    "https://*.hdrezka.me/*",
+
+    "https://www.wikidata.org/*",
+
+    "https://query.wikidata.org/*"
 
   ],
 

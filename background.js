@@ -181,6 +181,7 @@ function normalizeKinopoiskId(filmId) {
     .trim()
     .replace(/^https?:\/\/(?:www\.)?gokino\.by\/matrix\/search\.php\?(?:[^#]*&)?q=/i, '')
     .replace(/^https?:\/\/(?:www\.)?matrix\.gokino\.by\/\?(?:[^#]*&)?q=/i, '')
+    .replace(/^mtr-/i, '')
     .replace(/[^\d].*$/, '');
 
   if (!/^\d{3,}$/.test(raw)) {
@@ -188,6 +189,155 @@ function normalizeKinopoiskId(filmId) {
   }
 
   return raw;
+}
+
+function normalizeImdbId(filmId) {
+  const raw = String(filmId || '').trim();
+  const fromUrl = raw.match(/imdb\.com\/title\/(tt\d{7,8})/i);
+  if (fromUrl) {
+    return fromUrl[1].toLowerCase();
+  }
+
+  const fromShort = raw.match(/^mtr-(tt\d{7,8})$/i);
+  if (fromShort) {
+    return fromShort[1].toLowerCase();
+  }
+
+  const direct = raw.match(/^(tt\d{7,8})$/i);
+  if (direct) {
+    return direct[1].toLowerCase();
+  }
+
+  throw new Error('Некорректный ID IMDb');
+}
+
+function parseMatrixFilmRef(filmId) {
+  const raw = String(filmId || '').trim();
+  if (!raw) {
+    throw new Error('Некорректный ID фильма');
+  }
+
+  try {
+    return { type: 'imdb', id: normalizeImdbId(raw) };
+  } catch {
+    /* not imdb */
+  }
+
+  return { type: 'kp', id: normalizeKinopoiskId(raw) };
+}
+
+const imdbToKpCache = new Map();
+
+async function fetchWikidataJson(url) {
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json'
+    },
+    cache: 'force-cache'
+  });
+
+  if (!response.ok) {
+    throw new Error(`Wikidata: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+async function resolveImdbToKinopoiskViaSparql(imdbId) {
+  const query = `
+SELECT ?kp WHERE {
+  ?item wdt:P345 "${imdbId}".
+  ?item wdt:P2603 ?kp.
+}
+LIMIT 1`.trim();
+
+  const url =
+    'https://query.wikidata.org/sparql?format=json&query=' +
+    encodeURIComponent(query);
+  const data = await fetchWikidataJson(url);
+  const value = data?.results?.bindings?.[0]?.kp?.value;
+  if (value && /^\d{3,}$/.test(String(value))) {
+    return String(value);
+  }
+  return null;
+}
+
+async function resolveImdbToKinopoiskViaApi(imdbId) {
+  const searchUrl =
+    'https://www.wikidata.org/w/api.php?action=query&list=search&format=json&srlimit=1&srsearch=' +
+    encodeURIComponent(`haswbstatement:P345=${imdbId}`);
+  const search = await fetchWikidataJson(searchUrl);
+  const qid = search?.query?.search?.[0]?.title;
+  if (!qid) {
+    return null;
+  }
+
+  const entityUrl =
+    'https://www.wikidata.org/w/api.php?action=wbgetentities&format=json&props=claims|labels&languages=ru|en&ids=' +
+    encodeURIComponent(qid);
+  const entities = await fetchWikidataJson(entityUrl);
+  const entity = entities?.entities?.[qid];
+  const kp = entity?.claims?.P2603?.[0]?.mainsnak?.datavalue?.value;
+  if (kp && /^\d{3,}$/.test(String(kp))) {
+    return String(kp);
+  }
+  return null;
+}
+
+async function resolveImdbToKinopoisk(imdbId) {
+  const normalized = normalizeImdbId(imdbId);
+  if (imdbToKpCache.has(normalized)) {
+    return imdbToKpCache.get(normalized);
+  }
+
+  const stored = await chrome.storage.local.get('imdbToKpCache');
+  const diskCache =
+    stored?.imdbToKpCache && typeof stored.imdbToKpCache === 'object'
+      ? stored.imdbToKpCache
+      : {};
+  if (diskCache[normalized] && /^\d{3,}$/.test(String(diskCache[normalized]))) {
+    const cached = String(diskCache[normalized]);
+    imdbToKpCache.set(normalized, cached);
+    return cached;
+  }
+
+  let kpId = null;
+  let lastError = null;
+
+  try {
+    kpId = await resolveImdbToKinopoiskViaSparql(normalized);
+  } catch (error) {
+    lastError = error;
+  }
+
+  if (!kpId) {
+    try {
+      kpId = await resolveImdbToKinopoiskViaApi(normalized);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  if (!kpId) {
+    throw new Error(
+      lastError?.message ||
+        `Не удалось найти фильм на Кинопоиске по IMDb ${normalized}`
+    );
+  }
+
+  imdbToKpCache.set(normalized, kpId);
+  diskCache[normalized] = kpId;
+  await chrome.storage.local.set({ imdbToKpCache: diskCache }).catch(() => {});
+  return kpId;
+}
+
+async function resolveMatrixKinopoiskId(filmId) {
+  const ref = parseMatrixFilmRef(filmId);
+  if (ref.type === 'kp') {
+    return ref.id;
+  }
+  return resolveImdbToKinopoisk(ref.id);
 }
 
 function matrixPageUrlFromKpId(kpId) {
@@ -417,7 +567,7 @@ function parseMatrixPlayers(html, kpId, pageUrl) {
 }
 
 async function getMatrixPlayerEmbed(filmId) {
-  const kpId = normalizeKinopoiskId(filmId);
+  const kpId = await resolveMatrixKinopoiskId(filmId);
   const pageUrl = matrixPageUrlFromKpId(kpId);
   const title = `Кинопоиск #${kpId}`;
 
@@ -1569,6 +1719,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'getPlayerEmbed') {
     getPlayerEmbed(message.filmId, message.service)
       .then((data) => sendResponse({ ok: true, data }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === 'resolveMatrixFilmId') {
+    resolveMatrixKinopoiskId(message.filmId)
+      .then((kpId) => sendResponse({ ok: true, kpId }))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   }
