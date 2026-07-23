@@ -201,6 +201,30 @@ function getMatrixFetchUrls(kpId) {
   ];
 }
 
+function isCloudflareChallengeResponse(response, html = '') {
+  const mitigated = String(response.headers.get('cf-mitigated') || '').toLowerCase();
+  if (mitigated.includes('challenge')) {
+    return true;
+  }
+
+  const server = String(response.headers.get('server') || '').toLowerCase();
+  if (response.status === 403 && server.includes('cloudflare')) {
+    return true;
+  }
+
+  return isCloudflareChallengeHtml(html);
+}
+
+function isCloudflareChallengeHtml(html) {
+  const body = String(html || '');
+  return (
+    /just a moment/i.test(body) ||
+    /cdn-cgi\/challenge-platform/i.test(body) ||
+    /cf-browser-verification/i.test(body) ||
+    /<title>\s*Attention Required!\s*\|\s*Cloudflare\s*<\/title>/i.test(body)
+  );
+}
+
 async function fetchMatrixHtml(kpId) {
   let lastError = null;
 
@@ -214,13 +238,20 @@ async function fetchMatrixHtml(kpId) {
         cache: 'no-store'
       });
 
+      const html = await response.text();
+
+      if (isCloudflareChallengeResponse(response, html) || isCloudflareChallengeHtml(html)) {
+        lastError = new Error('Cloudflare заблокировал запрос к Matrix');
+        continue;
+      }
+
       if (!response.ok) {
         lastError = new Error(`Ошибка запроса: ${response.status}`);
         continue;
       }
 
       return {
-        html: await response.text(),
+        html,
         pageUrl
       };
     } catch (error) {
@@ -387,26 +418,46 @@ function parseMatrixPlayers(html, kpId, pageUrl) {
 
 async function getMatrixPlayerEmbed(filmId) {
   const kpId = normalizeKinopoiskId(filmId);
-  const { html, pageUrl } = await fetchMatrixHtml(kpId);
-  const titleMatch =
-    html.match(/Фильм по ID\s*(\d+)/i) ||
-    html.match(/<h1[^>]*>([^<]*ID[^<]*\d+[^<]*)<\/h1>/i) ||
-    html.match(/<title>([^<]+)<\/title>/);
-  const title = titleMatch
-    ? decodeHtmlEntities(titleMatch[1].trim())
-    : `Кинопоиск #${kpId}`;
-  const players = parseMatrixPlayers(html, kpId, pageUrl);
-  const defaultPlayer = players[0];
+  const pageUrl = matrixPageUrlFromKpId(kpId);
+  const title = `Кинопоиск #${kpId}`;
 
-  return {
-    filmId: kpId,
-    title,
-    pageUrl,
-    players,
-    activePlayerId: defaultPlayer.id,
-    embedUrl: defaultPlayer.url,
-    service: 'matrix'
-  };
+  try {
+    const fetched = await fetchMatrixHtml(kpId);
+    const titleMatch =
+      fetched.html.match(/Фильм по ID\s*(\d+)/i) ||
+      fetched.html.match(/<h1[^>]*>([^<]*ID[^<]*\d+[^<]*)<\/h1>/i) ||
+      fetched.html.match(/<title>([^<]+)<\/title>/);
+    const resolvedTitle = titleMatch
+      ? decodeHtmlEntities(titleMatch[1].trim())
+      : title;
+    const players = parseMatrixPlayers(fetched.html, kpId, fetched.pageUrl);
+    const defaultPlayer = players[0];
+
+    return {
+      filmId: kpId,
+      title: resolvedTitle,
+      pageUrl: fetched.pageUrl,
+      players,
+      activePlayerId: defaultPlayer.id,
+      embedUrl: defaultPlayer.url,
+      service: 'matrix'
+    };
+  } catch {
+    // gokino.by / matrix.gokino.by часто отдают Cloudflare 403 из service worker.
+    // Для замены плеера достаточно embed-URL по ID Кинопоиска.
+    const players = buildMatrixFallbackPlayers(kpId, pageUrl);
+    const defaultPlayer = players[0];
+
+    return {
+      filmId: kpId,
+      title,
+      pageUrl,
+      players,
+      activePlayerId: defaultPlayer.id,
+      embedUrl: defaultPlayer.url,
+      service: 'matrix'
+    };
+  }
 }
 
 async function fetchAprelHtml(path) {
