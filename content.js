@@ -2175,14 +2175,22 @@
   let ryhOriginalTitle = '';
 
   function getTwitchChannelLogin() {
-    const path = String(location.pathname || '')
+    const parts = String(location.pathname || '')
       .replace(/^\/+|\/+$/g, '')
-      .split('/')[0];
-    if (!path) {
+      .split('/')
+      .filter(Boolean);
+    if (!parts.length) {
       return '';
     }
+
+    // /popout/martimor/chat  или  /moderator/martimor/...
+    if (/^(popout|moderator|embed)$/i.test(parts[0]) && parts[1]) {
+      return parts[1].toLowerCase();
+    }
+
+    const path = parts[0];
     if (
-      /^(directory|videos|downloads|jobs|privacy|products|search|settings|subs|turbo|wallet|inventory|drops|prime|p|moderator|popout|embed)$/i.test(
+      /^(directory|videos|downloads|jobs|privacy|products|search|settings|subs|turbo|wallet|inventory|drops|prime|p)$/i.test(
         path
       )
     ) {
@@ -2197,12 +2205,11 @@
       return customEmoteLookup.get(login);
     }
 
-    const titleMatch = String(document.title || '').match(/^(.+?)\s*-\s*Twitch\s*$/i);
-    const titleName = titleMatch?.[1]?.trim();
-    if (titleName) {
-      const fromTitle = customEmoteLookup.get(titleName.toLowerCase());
-      if (fromTitle) {
-        return fromTitle;
+    const title = String(document.title || '');
+    // "Martimor - Twitch" или "Martimor - Chat - Twitch"
+    for (const [name, emote] of customEmoteLookup.entries()) {
+      if (new RegExp(`(^|[\\s\\-_|])${name.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}([\\s\\-_|]|$)`, 'i').test(title)) {
+        return emote;
       }
     }
 
