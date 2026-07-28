@@ -6,6 +6,7 @@ const copyLinkBtn = document.getElementById('copyLinkBtn');
 const copyRoomLinkBtn = document.getElementById('copyRoomLinkBtn');
 const replaceBtn = document.getElementById('replaceBtn');
 const replaceYoutubeBtn = document.getElementById('replaceYoutubeBtn');
+const replaceRutubeBtn = document.getElementById('replaceRutubeBtn');
 const restoreBtn = document.getElementById('restoreBtn');
 const statusBadge = document.getElementById('statusBadge');
 const messageEl = document.getElementById('message');
@@ -21,7 +22,8 @@ const SEARCH_DELAY_MS = 500;
 const SERVICE_LABELS = {
   reyohoho: 'ReYohoho',
   aprel: 'Aprel',
-  matrix: 'Matrix'
+  matrix: 'Matrix',
+  rutube: 'Rutube'
 };
 
 let searchTimer = null;
@@ -75,7 +77,7 @@ async function setVideoService(service) {
 }
 
 function updateSyncToggleUi(active, mode, syncEnabled = false) {
-  const supported = active && (mode === 'aprel' || mode === 'matrix');
+  const supported = active && (mode === 'aprel' || mode === 'matrix' || mode === 'rutube');
   syncToggleWrap.classList.toggle('hidden', !supported);
   if (supported) {
     syncToggle.checked = Boolean(syncEnabled);
@@ -85,7 +87,7 @@ function updateSyncToggleUi(active, mode, syncEnabled = false) {
 function setFilmActive(active, service = videoService) {
   const label = getServiceLabel(service);
   statusBadge.textContent = active ? label : 'Twitch';
-  statusBadge.className = `badge${active ? ' active' : ''}${active && service === 'aprel' ? ' aprel' : ''}${active && service === 'matrix' ? ' matrix' : ''}`;
+  statusBadge.className = `badge${active ? ' active' : ''}${active && service === 'aprel' ? ' aprel' : ''}${active && service === 'matrix' ? ' matrix' : ''}${active && service === 'rutube' ? ' rutube' : ''}`;
   restoreBtn.classList.toggle('hidden', !active);
   if (active) {
     clearYoutubeRoomSelection();
@@ -116,7 +118,13 @@ function applyFilmFromPlayerState(state) {
 
   activePlayerFilmId = state.filmId;
   const service =
-    state.mode === 'matrix' ? 'matrix' : state.mode === 'aprel' ? 'aprel' : 'reyohoho';
+    state.mode === 'matrix'
+      ? 'matrix'
+      : state.mode === 'aprel'
+        ? 'aprel'
+        : state.mode === 'rutube'
+          ? 'rutube'
+          : 'reyohoho';
 
   if (!selectedFilm?.id || selectedFilm.id !== state.filmId) {
     selectedFilm = {
@@ -133,6 +141,22 @@ function applyFilmFromPlayerState(state) {
 
 function getMatrixShareLink(kpId) {
   return `mtr-${String(kpId || '').replace(/\D/g, '')}`;
+}
+
+function getRutubeShareLink(roomId, videoId) {
+  const id = String(roomId || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+  if (id.length < 8) {
+    return '';
+  }
+  const video = String(videoId || '')
+    .toLowerCase()
+    .replace(/[^a-f0-9]/g, '');
+  if (/^[a-f0-9]{32}$/.test(video)) {
+    return `rtb-${id}-${video}`;
+  }
+  return `rtb-${id}`;
 }
 
 function getAprelShareLink(filmPath) {
@@ -153,6 +177,9 @@ function getFilmShareLink(filmId, service = videoService) {
   }
   if (service === 'aprel') {
     return getAprelShareLink(filmId);
+  }
+  if (service === 'rutube') {
+    return getRutubeShareLink(filmId);
   }
   return getRyhShareLink(filmId);
 }
@@ -227,7 +254,23 @@ async function copyFilmLink() {
     return;
   }
 
-  const link = getFilmShareLink(selectedFilm.id, selectedFilm.service || videoService);
+  let link = getFilmShareLink(selectedFilm.id, selectedFilm.service || videoService);
+
+  if ((selectedFilm.service || videoService) === 'rutube') {
+    try {
+      const state = await sendToContentScript('getState');
+      if (state?.rutubeRoomId) {
+        link = getRutubeShareLink(state.rutubeRoomId, state.filmId);
+      }
+    } catch {
+      /* keep fallback link */
+    }
+  }
+
+  if (!link) {
+    showMessage('Не удалось сформировать ссылку', 'error');
+    return;
+  }
 
   try {
     await copyTextToClipboard(link);
@@ -280,6 +323,11 @@ function setReplaceLoading(loading) {
 function setYoutubeReplaceLoading(loading) {
   replaceYoutubeBtn.disabled = loading;
   replaceYoutubeBtn.textContent = loading ? 'Создание комнаты...' : 'Заменить на YouTube';
+}
+
+function setRutubeReplaceLoading(loading) {
+  replaceRutubeBtn.disabled = loading;
+  replaceRutubeBtn.textContent = loading ? 'Загрузка...' : 'Заменить на Rutube';
 }
 
 function isStaleContentScriptError(error) {
@@ -697,6 +745,45 @@ replaceYoutubeBtn.addEventListener('click', async () => {
   }
 });
 
+replaceRutubeBtn.addEventListener('click', async () => {
+  setRutubeReplaceLoading(true);
+  showMessage('Запуск Rutube...', '');
+
+  try {
+    const response = await sendToContentScript('replaceRutubePlayer');
+
+    if (!response?.ok) {
+      throw new Error(response?.error || 'Не удалось заменить плеер');
+    }
+
+    setFilmActive(true, 'rutube');
+    updateSyncToggleUi(true, 'rutube', Boolean(response.syncEnabled));
+    clearYoutubeRoomSelection();
+    activePlayerFilmId = response.filmId || null;
+
+    selectedFilm = {
+      id: response.rutubeRoomId || response.filmId || 'rutube',
+      name: response.title || 'Rutube',
+      year: '',
+      service: 'rutube'
+    };
+    selectedFilmTitle.textContent = response.title || 'Rutube';
+    selectedFilmEl.classList.remove('hidden');
+    updateReplaceButton();
+
+    showMessage(
+      response.filmId
+        ? `Сейчас: ${response.title || 'Rutube'}`
+        : 'Rutube готов. Скопируйте ссылку rtb-… и добавляйте видео с rutube.ru.',
+      'success'
+    );
+  } catch (error) {
+    showMessage(error.message, 'error');
+  } finally {
+    setRutubeReplaceLoading(false);
+  }
+});
+
 restoreBtn.addEventListener('click', async () => {
   try {
     const stateResponse = await sendToContentScript('getState');
@@ -706,7 +793,7 @@ restoreBtn.addEventListener('click', async () => {
         await runtimeMessage({ type: 'clearYoutubeRoom' });
         setYoutubeActive(false);
       } else {
-        setFilmActive(false, stateResponse?.mode === 'aprel' ? 'aprel' : stateResponse?.mode === 'matrix' ? 'matrix' : 'reyohoho');
+        setFilmActive(false, stateResponse?.mode === 'aprel' ? 'aprel' : stateResponse?.mode === 'matrix' ? 'matrix' : stateResponse?.mode === 'rutube' ? 'rutube' : 'reyohoho');
       }
       activePlayerFilmId = null;
       showMessage('Плеер Twitch восстановлен', 'success');
@@ -743,10 +830,36 @@ async function syncState() {
           : '',
         'success'
       );
+    } else if (response?.active && response.mode === 'rutube') {
+      clearYoutubeRoomSelection();
+      setFilmActive(true, 'rutube');
+      updateSyncToggleUi(true, 'rutube', response.syncEnabled);
+      selectedFilm = {
+        id: response.rutubeRoomId || response.filmId || 'rutube',
+        name: response.title || 'Rutube',
+        year: '',
+        service: 'rutube'
+      };
+      selectedFilmTitle.textContent = response.title || 'Rutube';
+      selectedFilmEl.classList.remove('hidden');
+      activePlayerFilmId = response.filmId || null;
+      updateReplaceButton();
+      const queueHint =
+        response.queueLength > 0 ? ` · очередь: ${response.queueLength}` : '';
+      showMessage(
+        response.filmId
+          ? `Сейчас: ${response.title || 'Rutube'}${queueHint}`
+          : 'Rutube готов. Добавляйте видео кнопкой «В очередь» на rutube.ru.',
+        'success'
+      );
     } else if (response?.active && response.filmId) {
       clearYoutubeRoomSelection();
       const service =
-        response.mode === 'matrix' ? 'matrix' : response.mode === 'aprel' ? 'aprel' : 'reyohoho';
+        response.mode === 'matrix'
+          ? 'matrix'
+          : response.mode === 'aprel'
+            ? 'aprel'
+            : 'reyohoho';
       setFilmActive(true, service);
       updateSyncToggleUi(true, service, response.syncEnabled);
       applyFilmFromPlayerState(response);

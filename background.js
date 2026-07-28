@@ -34,11 +34,40 @@ async function notifyYoutubeQueueTabs() {
   }
 }
 
+async function notifyRutubeQueueTabs() {
+  try {
+    const tabs = await chrome.tabs.query({
+      url: ['https://rutube.ru/*', 'https://www.rutube.ru/*']
+    });
+
+    await Promise.all(
+      tabs.map((tab) =>
+        chrome.tabs
+          .sendMessage(tab.id, { type: 'refreshRutubeQueueButton' })
+          .catch(() => {})
+      )
+    );
+  } catch {
+    /* ignore */
+  }
+}
+
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area !== 'local' || !changes.youtubeRoomState) {
+  if (area !== 'local') {
     return;
   }
-  notifyYoutubeQueueTabs();
+  if (changes.youtubeRoomState) {
+    notifyYoutubeQueueTabs();
+  }
+  if (changes.playerState) {
+    const prev = changes.playerState.oldValue;
+    const next = changes.playerState.newValue;
+    const wasRutube = prev?.mode === 'rutube' && prev?.active;
+    const isRutube = next?.mode === 'rutube' && next?.active;
+    if (wasRutube || isRutube) {
+      notifyRutubeQueueTabs();
+    }
+  }
 });
 
 const TWITCH_TAB_URLS = ['https://www.twitch.tv/*', 'https://twitch.tv/*'];
@@ -58,6 +87,33 @@ async function findLiveYoutubeSession() {
           tabId: tab.id,
           roomId: state.roomId,
           roomUrl: state.roomUrl || ''
+        };
+      }
+    } catch {
+      /* content script unavailable */
+    }
+  }
+
+  return null;
+}
+
+async function findLiveRutubeSession() {
+  const tabs = await chrome.tabs.query({ url: TWITCH_TAB_URLS });
+
+  for (const tab of tabs) {
+    if (!tab.id) {
+      continue;
+    }
+
+    try {
+      const state = await chrome.tabs.sendMessage(tab.id, { type: 'getState' });
+      if (state?.active && state.mode === 'rutube') {
+        return {
+          tabId: tab.id,
+          filmId: state.filmId || null,
+          title: state.title || '',
+          queueLength: Number(state.queueLength) || 0,
+          syncEnabled: Boolean(state.syncEnabled)
         };
       }
     } catch {
@@ -781,7 +837,9 @@ async function skipWatchPartyVideoInTab(tabId) {
   const [result] = await chrome.scripting.executeScript({
     target: { tabId, frameIds: [frameId] },
     world: 'MAIN',
-    func: () => {
+    func: async () => {
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
       function walkAllFibers(fiber) {
         let found = null;
 
@@ -839,29 +897,82 @@ async function skipWatchPartyVideoInTab(tabId) {
       }
 
       const app = findAppInstance();
-      if (app?.state?.playlist?.length > 0) {
-        app.roomPlaylistPlay(0);
-        return { ok: true, method: 'roomPlaylistPlay' };
+      const currentMediaBefore =
+        app?.state?.roomMedia ||
+        app?.state?.media ||
+        app?.props?.roomMedia ||
+        null;
+      const queueLengthBefore = Array.isArray(app?.state?.playlist) ? app.state.playlist.length : 0;
+
+      async function waitForMediaChange(timeoutMs = 5000) {
+        const started = Date.now();
+        while (Date.now() - started < timeoutMs) {
+          const currentMediaAfter =
+            app?.state?.roomMedia ||
+            app?.state?.media ||
+            app?.props?.roomMedia ||
+            null;
+          const queueLengthAfter = Array.isArray(app?.state?.playlist) ? app.state.playlist.length : 0;
+          if (
+            currentMediaAfter !== currentMediaBefore ||
+            queueLengthAfter !== queueLengthBefore
+          ) {
+            return {
+              ok: true,
+              changed: true,
+              roomMedia: currentMediaAfter,
+              queueLength: queueLengthAfter
+            };
+          }
+          await sleep(150);
+        }
+        return {
+          ok: true,
+          changed: false,
+          roomMedia:
+            app?.state?.roomMedia ||
+            app?.state?.media ||
+            app?.props?.roomMedia ||
+            null,
+          queueLength: Array.isArray(app?.state?.playlist) ? app.state.playlist.length : 0
+        };
+      }
+
+      if (app?.socket) {
+        app.socket.emit('CMD:playlistNext', currentMediaBefore);
+        const waited = await waitForMediaChange();
+        if (waited.changed) {
+          return { ok: true, method: 'socket', ...waited };
+        }
       }
 
       const controls = document.querySelector('[class*="_controls_"]');
       const skipIcon = controls?.querySelector('.tabler-icon-player-skip-forward-filled');
       if (skipIcon) {
-        const target = skipIcon.closest('svg') || skipIcon;
+        const target = skipIcon.closest('button') || skipIcon.closest('svg') || skipIcon;
         target.dispatchEvent(
           new MouseEvent('click', { bubbles: true, cancelable: true, view: window })
         );
-        return { ok: true, method: 'click' };
+        const waited = await waitForMediaChange(3500);
+        if (waited.changed) {
+          return { ok: true, method: 'click', ...waited };
+        }
       }
 
-      if (app?.socket) {
-        app.socket.emit('CMD:playlistNext', app.state?.roomMedia || null);
-        return { ok: true, method: 'socket' };
+      if (app?.state?.playlist?.length > 0 && typeof app.roomPlaylistPlay === 'function') {
+        app.roomPlaylistPlay(0);
+        const waited = await waitForMediaChange(3500);
+        if (waited.changed) {
+          return { ok: true, method: 'roomPlaylistPlay', ...waited };
+        }
       }
 
       return {
         ok: false,
-        error: 'В очереди нет следующего видео'
+        error:
+          queueLengthBefore > 0
+            ? 'Следующее видео не запустилось после skip'
+            : 'В очереди нет следующего видео'
       };
     }
   });
@@ -1015,6 +1126,13 @@ function buildSyncRoomId(service, filmId) {
     return path ? `aprel_${path}` : '';
   }
 
+  if (service === 'rutube') {
+    const id = String(filmId || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, '');
+    return id.length >= 8 ? `rutube_${id}` : '';
+  }
+
   return '';
 }
 
@@ -1116,7 +1234,9 @@ async function getOverlayPlayerFrameIds(tabId) {
         frame.url &&
         (/https:\/\/aprelteam\.gokino\.by\//i.test(frame.url) ||
           /https:\/\/(?:www\.)?gokino\.by\/matrix\//i.test(frame.url) ||
-          /https:\/\/(?:www\.)?matrix\.gokino\.by\//i.test(frame.url))
+          /https:\/\/(?:www\.)?matrix\.gokino\.by\//i.test(frame.url) ||
+          /https:\/\/(?:[\w.-]+\.)?rutube\.ru\//i.test(frame.url) ||
+          /https:\/\/(?:[\w.-]+\.)?rtbcdn\.ru\//i.test(frame.url))
       ) {
         roots.push(frame.frameId);
       }
@@ -1198,6 +1318,13 @@ async function callPlayerSync(tabId, method, args = {}) {
         return api.broadcastSeek(syncArgs.time);
       }
 
+      if (syncMethod === 'broadcastPlayback') {
+        if (typeof api.broadcastPlayback !== 'function') {
+          return { ok: false, error: 'broadcastPlayback недоступен' };
+        }
+        return api.broadcastPlayback(syncArgs.event, syncArgs.time);
+      }
+
       if (syncMethod === 'broadcastSeekDelta') {
         overlayFrame?.contentWindow?.postMessage(
           {
@@ -1208,6 +1335,13 @@ async function callPlayerSync(tabId, method, args = {}) {
           '*'
         );
         return api.broadcastSeekDelta(syncArgs.delta);
+      }
+
+      if (syncMethod === 'broadcastRutubeEvent') {
+        if (typeof api.broadcastRutubeEvent !== 'function') {
+          return { ok: false, error: 'Rutube sync event недоступен' };
+        }
+        return api.broadcastRutubeEvent(syncArgs.event);
       }
 
       if (syncMethod === 'getState') {
@@ -1289,6 +1423,54 @@ async function playerSyncSeekDeltaInTab(tabId, delta) {
   }
 
   return { ok: true };
+}
+
+async function playerSyncBroadcastPlaybackInTab(tabId) {
+  await ensurePlayerBridgesInTab(tabId);
+
+  const frameIds = await getOverlayPlayerFrameIds(tabId);
+  let snapshot = null;
+
+  for (const frameId of frameIds) {
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId, frameIds: [frameId] },
+      world: 'MAIN',
+      func: () => {
+        if (typeof window.RYH_PlayerBridge?.getPlaybackSnapshot === 'function') {
+          return window.RYH_PlayerBridge.getPlaybackSnapshot();
+        }
+        const time = window.RYH_PlayerBridge?.getCurrentTime?.();
+        if (typeof time !== 'number') {
+          return null;
+        }
+        return { time, paused: false };
+      }
+    });
+
+    if (result?.result && typeof result.result.time === 'number') {
+      snapshot = result.result;
+      break;
+    }
+  }
+
+  if (!snapshot || !Number.isFinite(snapshot.time) || snapshot.time >= 100000) {
+    return { ok: false, error: 'Нет текущего времени плеера' };
+  }
+
+  await callPlayerSync(tabId, 'broadcastSeek', { time: snapshot.time });
+  await sleepMs(50);
+  await callPlayerSync(tabId, 'broadcastPlayback', {
+    event: snapshot.paused ? 'pause' : 'play',
+    time: snapshot.time
+  });
+
+  return { ok: true, time: snapshot.time, paused: Boolean(snapshot.paused) };
+}
+
+async function playerSyncRutubeEventInTab(tabId, eventName) {
+  return callPlayerSync(tabId, 'broadcastRutubeEvent', {
+    event: String(eventName || '')
+  });
 }
 
 async function getPlayerSyncStateInTab(tabId) {
@@ -1876,6 +2058,82 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === 'getRutubeJoinState') {
+    findLiveRutubeSession()
+      .then((session) => {
+        if (session) {
+          sendResponse({
+            ok: true,
+            joined: true,
+            filmId: session.filmId,
+            title: session.title,
+            queueLength: session.queueLength,
+            syncEnabled: session.syncEnabled,
+            tabId: session.tabId
+          });
+          return;
+        }
+
+        sendResponse({ ok: true, joined: false, filmId: null, queueLength: 0 });
+      })
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === 'addToRutubeQueue') {
+    findLiveRutubeSession()
+      .then(async (session) => {
+        let tabs;
+        if (session) {
+          tabs = [{ id: session.tabId }];
+        } else {
+          const all = await chrome.tabs.query({ url: TWITCH_TAB_URLS });
+          const [active] = await chrome.tabs.query({
+            active: true,
+            currentWindow: true
+          });
+          tabs = [];
+          if (active?.id && all.some((tab) => tab.id === active.id)) {
+            tabs.push({ id: active.id });
+          }
+          for (const tab of all) {
+            if (tab.id && tab.id !== active?.id) {
+              tabs.push({ id: tab.id });
+            }
+          }
+        }
+
+        let lastError =
+          'Откройте Twitch и нажмите «Заменить на Rutube» в расширении';
+        for (const tab of tabs) {
+          if (!tab.id) {
+            continue;
+          }
+
+          try {
+            const response = await chrome.tabs.sendMessage(tab.id, {
+              type: 'addToRutubeQueue',
+              videoId: message.videoId,
+              title: message.title || '',
+              videoUrl: message.videoUrl || ''
+            });
+            if (response?.ok) {
+              notifyRutubeQueueTabs();
+              sendResponse(response);
+              return;
+            }
+            lastError = response?.error || lastError;
+          } catch (error) {
+            lastError = error?.message || lastError;
+          }
+        }
+
+        sendResponse({ ok: false, error: lastError });
+      })
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
   if (message.type === 'ensurePlayerBridgeInTab') {
     const tabId = message.tabId || sender.tab?.id;
     if (!tabId) {
@@ -1942,6 +2200,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     playerSyncSeekDeltaInTab(tabId, message.delta)
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === 'playerSyncBroadcastPlayback') {
+    const tabId = message.tabId || sender.tab?.id;
+    if (!tabId) {
+      sendResponse({ ok: false, error: 'Вкладка не найдена' });
+      return false;
+    }
+
+    playerSyncBroadcastPlaybackInTab(tabId)
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === 'playerSyncRutubeEvent') {
+    const tabId = message.tabId || sender.tab?.id;
+    if (!tabId) {
+      sendResponse({ ok: false, error: 'Вкладка не найдена' });
+      return false;
+    }
+
+    playerSyncRutubeEventInTab(tabId, message.event)
       .then((result) => sendResponse(result))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;

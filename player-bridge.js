@@ -6,13 +6,44 @@
   const TIMEUPDATE_DEBOUNCE_MS = 800;
   const SEEK_THRESHOLD = 1.5;
   const TIME_POLL_MS = 450;
+  // Seek times in this range are Rutube playlist control codes, never real media time.
+  const MAGIC_SEEK_MIN = 100000;
 
   let lastReportedTime = 0;
   let timeupdateTimer = null;
   let applyingRemote = false;
-  let lastPlaybackEvent = '';
+  let lastPlaybackEvent = 'pause';
   let lastPolledTime = 0;
   let pollTimer = null;
+  let lastUserGestureAt = 0;
+  // Swallow load/buffer play-pause churn after remote commands.
+  let suppressAutoPlaybackUntil = 0;
+  const REMOTE_PLAYBACK_GUARD_MS = 1600;
+  const LOAD_ECHO_SUPPRESS_MS = 2500;
+  const USER_GESTURE_WINDOW_MS = 900;
+
+  function markUserGesture() {
+    lastUserGestureAt = Date.now();
+  }
+
+  function isRecentUserGesture() {
+    return Date.now() - lastUserGestureAt < USER_GESTURE_WINDOW_MS;
+  }
+
+  function bindUserGestureCapture() {
+    if (window.__RYH_BRIDGE_GESTURE__) {
+      return;
+    }
+    window.__RYH_BRIDGE_GESTURE__ = true;
+    const mark = () => markUserGesture();
+    document.addEventListener('pointerdown', mark, true);
+    document.addEventListener('keydown', (event) => {
+      const key = String(event.key || '');
+      if (key === ' ' || key === 'k' || key === 'K' || key === 'MediaPlayPause') {
+        mark();
+      }
+    }, true);
+  }
 
   function postToParent(type, payload) {
     try {
@@ -27,6 +58,21 @@
     } catch {
       /* ignore */
     }
+  }
+
+  function withApplyingRemote(durationMs, fn) {
+    applyingRemote = true;
+    try {
+      return fn();
+    } finally {
+      window.setTimeout(() => {
+        applyingRemote = false;
+      }, durationMs);
+    }
+  }
+
+  function isRealMediaTime(time) {
+    return typeof time === 'number' && Number.isFinite(time) && time >= 0 && time < MAGIC_SEEK_MIN;
   }
 
   function extractSeekTime(data) {
@@ -154,6 +200,17 @@
     return video.currentTime;
   }
 
+  function getPlaybackSnapshot() {
+    const video = getPrimaryVideo();
+    if (!video || !Number.isFinite(video.currentTime)) {
+      return null;
+    }
+    return {
+      time: video.currentTime,
+      paused: Boolean(video.paused)
+    };
+  }
+
   function postPlayerCommand(command, value) {
     document.querySelectorAll('iframe').forEach((iframe) => {
       try {
@@ -187,34 +244,84 @@
   }
 
   function applySeekTime(time) {
-    const target = Number(time);
-    if (!Number.isFinite(target)) {
+    if (!isRealMediaTime(time)) {
       return false;
     }
 
-    applyingRemote = true;
-    lastReportedTime = target;
-    lastPolledTime = target;
+    return withApplyingRemote(1200, () => {
+      const target = Number(time);
+      lastReportedTime = target;
+      lastPolledTime = target;
 
-    const videos = findVideos();
-    let applied = false;
+      let applied = false;
+      findVideos().forEach((video) => {
+        try {
+          video.currentTime = target;
+          applied = true;
+        } catch {
+          /* ignore */
+        }
+      });
 
-    videos.forEach((video) => {
-      try {
-        video.currentTime = target;
-        applied = true;
-      } catch {
-        /* ignore */
-      }
+      postPlayerCommand('seek', target);
+      return applied;
     });
+  }
 
-    postPlayerCommand('seek', target);
+  function syncPlaybackTrackingFromVideo() {
+    const snapshot = getPlaybackSnapshot();
+    if (!snapshot) {
+      return;
+    }
 
-    window.setTimeout(() => {
-      applyingRemote = false;
-    }, 300);
+    lastPlaybackEvent = snapshot.paused ? 'pause' : 'play';
+  }
 
-    return applied;
+  function isLikelyBufferingPause(video) {
+    if (!video) {
+      return false;
+    }
+    // Transient pauses while media is still loading/buffering.
+    return video.readyState < 3 || video.networkState === 2;
+  }
+
+  function emitLocalPlayback(event, time) {
+    const nextEvent = String(event || '').toLowerCase();
+    if (nextEvent !== 'play' && nextEvent !== 'pause') {
+      return;
+    }
+
+    const fromUser = isRecentUserGesture();
+    if (applyingRemote && !fromUser) {
+      return;
+    }
+
+    const now = Date.now();
+    // Auto play/pause from buffering after remote command — ignore.
+    if (!fromUser && now < suppressAutoPlaybackUntil) {
+      return;
+    }
+
+    if (!fromUser && nextEvent === 'pause') {
+      const video = getPrimaryVideo();
+      if (isLikelyBufferingPause(video)) {
+        return;
+      }
+    }
+
+    // Duplicate of already-known state — do not rebroadcast.
+    if (nextEvent === lastPlaybackEvent) {
+      return;
+    }
+
+    lastPlaybackEvent = nextEvent;
+
+    const payload = { event: nextEvent };
+    const snapshotTime = isRealMediaTime(time) ? time : getCurrentTime();
+    if (isRealMediaTime(snapshotTime)) {
+      payload.time = snapshotTime;
+    }
+    postToParent('localPlayback', payload);
   }
 
   function applyPlayback(command, time) {
@@ -223,65 +330,46 @@
       return false;
     }
 
-    applyingRemote = true;
-    lastPlaybackEvent = cmd;
+    return withApplyingRemote(REMOTE_PLAYBACK_GUARD_MS, () => {
+      lastPlaybackEvent = cmd;
+      // Ignore automatic opposite events while media settles.
+      suppressAutoPlaybackUntil = Date.now() + LOAD_ECHO_SUPPRESS_MS;
 
-    const videos = findVideos();
+      const videos = findVideos();
 
-    if (typeof time === 'number' && Number.isFinite(time)) {
+      if (isRealMediaTime(time)) {
+        videos.forEach((video) => {
+          try {
+            video.currentTime = time;
+          } catch {
+            /* ignore */
+          }
+        });
+        postPlayerCommand('seek', time);
+        lastReportedTime = time;
+        lastPolledTime = time;
+      }
+
       videos.forEach((video) => {
         try {
-          video.currentTime = time;
+          if (cmd === 'play') {
+            video.play().catch(() => {});
+          } else {
+            video.pause();
+          }
         } catch {
           /* ignore */
         }
       });
-      postPlayerCommand('seek', time);
-      lastReportedTime = time;
-      lastPolledTime = time;
-    }
 
-    videos.forEach((video) => {
-      try {
-        if (cmd === 'play') {
-          video.play().catch(() => {});
-        } else {
-          video.pause();
-        }
-      } catch {
-        /* ignore */
-      }
+      postPlayerCommand(cmd, isRealMediaTime(time) ? time : undefined);
+      window.setTimeout(syncPlaybackTrackingFromVideo, 200);
+      return true;
     });
-
-    postPlayerCommand(cmd, time);
-
-    window.setTimeout(() => {
-      applyingRemote = false;
-    }, 300);
-
-    return true;
   }
 
   function reportPlayback(event, time) {
-    if (applyingRemote) {
-      return;
-    }
-
-    const nextEvent = String(event || '').toLowerCase();
-    if (nextEvent !== 'play' && nextEvent !== 'pause') {
-      return;
-    }
-
-    if (nextEvent === lastPlaybackEvent) {
-      return;
-    }
-
-    lastPlaybackEvent = nextEvent;
-    const payload = { event: nextEvent };
-    if (typeof time === 'number' && Number.isFinite(time)) {
-      payload.time = time;
-    }
-    postToParent('localPlayback', payload);
+    emitLocalPlayback(event, time);
   }
 
   function applySeekDelta(delta) {
@@ -297,11 +385,11 @@
       return;
     }
 
-    const nextTime = Number(time);
-    if (!Number.isFinite(nextTime)) {
+    if (!isRealMediaTime(time)) {
       return;
     }
 
+    const nextTime = Number(time);
     if (Math.abs(nextTime - lastReportedTime) < SEEK_THRESHOLD) {
       return;
     }
@@ -317,6 +405,12 @@
     }
 
     video.dataset.ryhBridgeBound = '1';
+    // New media element — ignore autoplay/load pause chatter briefly.
+    suppressAutoPlaybackUntil = Math.max(
+      suppressAutoPlaybackUntil,
+      Date.now() + LOAD_ECHO_SUPPRESS_MS
+    );
+    lastPlaybackEvent = video.paused ? 'pause' : 'play';
 
     video.addEventListener('seeked', () => {
       reportSeek(video.currentTime);
@@ -396,6 +490,7 @@
     }
 
     if (data.type === 'localPlayback' && (data.event === 'play' || data.event === 'pause')) {
+      lastPlaybackEvent = data.event;
       const payload = { event: data.event };
       if (typeof data.time === 'number' && Number.isFinite(data.time)) {
         payload.time = data.time;
@@ -418,11 +513,7 @@
     }
 
     if (data.event === 'play' || data.event === 'pause') {
-      const payload = { event: data.event };
-      if (typeof data.time === 'number' && Number.isFinite(data.time)) {
-        payload.time = data.time;
-      }
-      postToParent('localPlayback', payload);
+      emitLocalPlayback(data.event, data.time);
       return true;
     }
 
@@ -483,6 +574,7 @@
 
   bindPostMessage();
   bindParentCommands();
+  bindUserGestureCapture();
   bindVideos();
   startTimePoll();
 
@@ -497,6 +589,7 @@
 
   window.RYH_PlayerBridge = {
     getCurrentTime,
+    getPlaybackSnapshot,
     applySeekTime,
     applySeekDelta,
     applyPlayback

@@ -97,6 +97,11 @@ body {
   color: #00ff41;
 }
 
+.badge.rutube {
+  background: #0a2a3a;
+  color: #00a1e7;
+}
+
 .logo.aprel {
   color: #1abc9c;
 }
@@ -335,6 +340,20 @@ input[type='text']:focus {
 }
 
 .btn-youtube:not(:disabled):hover {
+  opacity: 0.9;
+}
+
+.btn-rutube {
+  background: #00a1e7;
+  color: #fff;
+}
+
+.btn-rutube:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn-rutube:not(:disabled):hover {
   opacity: 0.9;
 }
 

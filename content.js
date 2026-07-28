@@ -107,6 +107,11 @@
     {
       type: 'watchparty',
       pattern: /https?:\/\/(?:www\.)?watchparty\.me\/watch\/([a-z0-9-]+)/gi
+    },
+    {
+      type: 'film',
+      service: 'rutube',
+      pattern: /https?:\/\/(?:www\.)?rutube\.ru\/(?:video|play\/embed)\/([a-f0-9]{32})\/?/gi
     }
   ];
 
@@ -114,6 +119,8 @@
   const APREL_SHORT_PATTERN =
     /\bapr-((?:films|serials|mults|anime|nocategory)(?:--[a-z0-9-]+)+)\b/gi;
   const MATRIX_SHORT_PATTERN = /\bmtr-(\d{3,})\b/gi;
+  const RUTUBE_SHORT_PATTERN =
+    /\brtb-(?:([a-f0-9]{32})|([a-z0-9]{8,16})(?:-([a-f0-9]{32}))?)\b/gi;
 
   const CUSTOM_CHAT_EMOTES = [
     {
@@ -157,7 +164,8 @@
   const SERVICE_LABELS = {
     reyohoho: 'ReYohoho',
     aprel: 'Aprel Kino',
-    matrix: 'Matrix'
+    matrix: 'Matrix',
+    rutube: 'Rutube'
   };
 
   function getServiceLabel(service) {
@@ -165,10 +173,18 @@
   }
 
   function resolveFilmService(filmId, service) {
-    if (service === 'aprel' || service === 'reyohoho' || service === 'matrix') {
+    if (
+      service === 'aprel' ||
+      service === 'reyohoho' ||
+      service === 'matrix' ||
+      service === 'rutube'
+    ) {
       return service;
     }
     const id = String(filmId || '');
+    if (/^[a-f0-9]{32}$/i.test(id)) {
+      return 'rutube';
+    }
     if (id.includes('/')) {
       return 'aprel';
     }
@@ -188,7 +204,24 @@
         .replace(/\.html$/i, '');
       return `https://aprelteam.gokino.by/${path}.html`;
     }
+    if (resolvedService === 'rutube') {
+      const id = String(filmId || '').toLowerCase();
+      return `https://rutube.ru/video/${id}/`;
+    }
     return `https://reyohoho.com/films/${filmId}`;
+  }
+
+  function getRutubeEmbedUrl(videoId) {
+    return `https://rutube.ru/play/embed/${String(videoId || '').toLowerCase()}`;
+  }
+
+  function normalizeRutubeVideoId(value) {
+    const raw = String(value || '').trim();
+    const fromUrl = raw.match(
+      /rutube\.ru\/(?:video|play\/embed|shorts|live\/video|private\/video)\/([a-f0-9]{32})/i
+    );
+    const id = (fromUrl?.[1] || raw).toLowerCase();
+    return /^[a-f0-9]{32}$/.test(id) ? id : '';
   }
 
   function aprelPathToShortLink(filmPath) {
@@ -229,13 +262,236 @@
     players: [],
     activePlayerId: '',
     syncEnabled: false,
-    syncViewerCount: 0
+    syncViewerCount: 0,
+    rutubeQueue: [],
+    rutubeRoomId: ''
   };
 
   let syncBridgeTimer = null;
+  let applyingRemoteRutube = false;
+  let lastRutubeViewerCount = 0;
 
   function isSyncSupportedMode(mode) {
-    return mode === 'aprel' || mode === 'matrix';
+    return mode === 'aprel' || mode === 'matrix' || mode === 'rutube';
+  }
+
+  function createRutubeRoomId() {
+    if (crypto.randomUUID) {
+      return crypto.randomUUID().replace(/-/g, '').slice(0, 16);
+    }
+    return `${Date.now().toString(16)}${Math.random().toString(16).slice(2, 10)}`.slice(0, 16);
+  }
+
+  function ensureRutubeRoomId() {
+    if (playerState.mode === 'rutube' && playerState.rutubeRoomId) {
+      return playerState.rutubeRoomId;
+    }
+    const roomId = createRutubeRoomId();
+    playerState.rutubeRoomId = roomId;
+    return roomId;
+  }
+
+  function getSyncFilmIdForMode(mode = playerState.mode) {
+    if (mode === 'rutube') {
+      return playerState.rutubeRoomId || '';
+    }
+    return playerState.filmId;
+  }
+
+  function encodeRutubeTitle(title) {
+    return encodeURIComponent(String(title || 'Rutube').slice(0, 120));
+  }
+
+  function decodeRutubeTitle(value) {
+    try {
+      return decodeURIComponent(String(value || '')) || 'Rutube';
+    } catch {
+      return 'Rutube';
+    }
+  }
+
+  function buildRutubeMediaEvent(videoId, title) {
+    return `rutube_media:${videoId}:${encodeRutubeTitle(title)}`;
+  }
+
+  function buildRutubeQueueEvent(videoId, title) {
+    return `rutube_queue:${videoId}:${encodeRutubeTitle(title)}`;
+  }
+
+  function buildRutubeStateEvent() {
+    const current = normalizeRutubeVideoId(playerState.filmId) || '-';
+    const queue = (playerState.rutubeQueue || [])
+      .map((item) => normalizeRutubeVideoId(item.id))
+      .filter(Boolean)
+      .join(',');
+    return `rutube_state:${current}:${queue}`;
+  }
+
+  async function broadcastRutubeSyncEvent(eventName) {
+    if (!playerState.syncEnabled || playerState.mode !== 'rutube' || applyingRemoteRutube) {
+      return { ok: false, skipped: true };
+    }
+
+    return sendRuntimeMessage({
+      type: 'playerSyncRutubeEvent',
+      event: eventName
+    }).catch(() => ({ ok: false }));
+  }
+
+  async function broadcastRutubePlaylistState() {
+    if (!playerState.syncEnabled || playerState.mode !== 'rutube') {
+      return { ok: false, skipped: true };
+    }
+    if (!normalizeRutubeVideoId(playerState.filmId) && !(playerState.rutubeQueue || []).length) {
+      return { ok: false, skipped: true };
+    }
+    return broadcastRutubeSyncEvent(buildRutubeStateEvent());
+  }
+
+  async function requestRutubePlaylistState() {
+    if (!playerState.syncEnabled || playerState.mode !== 'rutube') {
+      return { ok: false, skipped: true };
+    }
+    return broadcastRutubeSyncEvent('rutube_request_state');
+  }
+
+  async function pushRutubePlaybackToPeers() {
+    if (!playerState.syncEnabled || playerState.mode !== 'rutube') {
+      return { ok: false, skipped: true };
+    }
+    if (!normalizeRutubeVideoId(playerState.filmId)) {
+      return { ok: false, skipped: true };
+    }
+    return sendRuntimeMessage({
+      type: 'playerSyncBroadcastPlayback'
+    }).catch(() => ({ ok: false }));
+  }
+
+  let rutubePushTimer = null;
+  let initialPlaybackSyncTimers = [];
+
+  function clearInitialPlaybackSyncTimers() {
+    initialPlaybackSyncTimers.forEach((timerId) => clearTimeout(timerId));
+    initialPlaybackSyncTimers = [];
+  }
+
+  function scheduleInitialPlaybackSync(videoId) {
+    clearInitialPlaybackSyncTimers();
+    if (!playerState.syncEnabled || playerState.mode !== 'rutube') {
+      return;
+    }
+
+    const id = normalizeRutubeVideoId(videoId);
+    if (!id) {
+      return;
+    }
+
+    // Re-broadcast media/state so peers in an empty room that missed the
+    // first WS burst still receive the new current video.
+    const mediaTimerId = window.setTimeout(() => {
+      if (
+        playerState.mode !== 'rutube' ||
+        !playerState.syncEnabled ||
+        normalizeRutubeVideoId(playerState.filmId) !== id
+      ) {
+        return;
+      }
+      pushRutubeStateToPeers({ withPlayback: false }).catch(() => {});
+    }, 1200);
+    initialPlaybackSyncTimers.push(mediaTimerId);
+
+    // Media sync goes over several WS "magic seek" chunks, then the peer
+    // still needs time to mount the Rutube embed. Push playhead twice.
+    [2800, 5000].forEach((delay) => {
+      const timerId = window.setTimeout(() => {
+        if (
+          playerState.mode !== 'rutube' ||
+          !playerState.syncEnabled ||
+          normalizeRutubeVideoId(playerState.filmId) !== id
+        ) {
+          return;
+        }
+        pushRutubePlaybackToPeers().catch(() => {});
+      }, delay);
+      initialPlaybackSyncTimers.push(timerId);
+    });
+  }
+
+  async function pushRutubeStateToPeers({ withPlayback = false } = {}) {
+    if (!playerState.syncEnabled || playerState.mode !== 'rutube') {
+      return { ok: false, skipped: true };
+    }
+
+    const videoId = normalizeRutubeVideoId(playerState.filmId);
+    if (!videoId) {
+      return { ok: false, skipped: true };
+    }
+
+    await broadcastRutubeSyncEvent(
+      buildRutubeMediaEvent(videoId, playerState.title || 'Rutube')
+    );
+    await broadcastRutubeSyncEvent(buildRutubeStateEvent());
+
+    if (!withPlayback) {
+      return { ok: true };
+    }
+
+    // Give peers a moment to load the embed, then sync playhead once.
+    window.setTimeout(() => {
+      if (
+        playerState.mode === 'rutube' &&
+        playerState.syncEnabled &&
+        normalizeRutubeVideoId(playerState.filmId) === videoId
+      ) {
+        pushRutubePlaybackToPeers().catch(() => {});
+      }
+    }, 1800);
+
+    return { ok: true };
+  }
+
+  function schedulePushRutubeStateToPeers(options = {}) {
+    if (rutubePushTimer) {
+      clearTimeout(rutubePushTimer);
+    }
+    rutubePushTimer = window.setTimeout(() => {
+      rutubePushTimer = null;
+      pushRutubeStateToPeers(options).catch(() => {});
+    }, 350);
+  }
+
+  function scheduleRutubeStateRequest() {
+    if (playerState.mode !== 'rutube' || !playerState.syncEnabled) {
+      return;
+    }
+    if (normalizeRutubeVideoId(playerState.filmId)) {
+      return;
+    }
+
+    // Empty-room peers often miss the first media burst; retry a few times.
+    [400, 1800, 4000].forEach((delay) => {
+      window.setTimeout(() => {
+        if (
+          playerState.mode === 'rutube' &&
+          playerState.syncEnabled &&
+          !normalizeRutubeVideoId(playerState.filmId)
+        ) {
+          requestRutubePlaylistState().catch(() => {});
+        }
+      }, delay);
+    });
+  }
+
+  function scheduleRutubePlaybackPull() {
+    if (playerState.mode !== 'rutube' || !playerState.syncEnabled) {
+      return;
+    }
+    requestRutubePlaylistState().catch(() => {});
+    window.setTimeout(() => {
+      if (playerState.mode === 'rutube' && playerState.syncEnabled) {
+        requestRutubePlaylistState().catch(() => {});
+      }
+    }, 1600);
   }
 
   function updateSyncUi(overlay) {
@@ -283,30 +539,49 @@
       return;
     }
 
+    if (!getSyncFilmIdForMode()) {
+      return;
+    }
+
     if (syncBridgeTimer) {
       clearTimeout(syncBridgeTimer);
     }
 
+    const delay =
+      playerState.mode === 'rutube' && !normalizeRutubeVideoId(playerState.filmId)
+        ? 400
+        : 1500;
+
     syncBridgeTimer = setTimeout(() => {
       syncBridgeTimer = null;
       rejoinPlayerSync().catch(() => {});
-    }, 1500);
+    }, delay);
   }
 
   async function joinPlayerSync() {
-    if (!playerState.syncEnabled || !isSyncSupportedMode(playerState.mode) || !playerState.filmId) {
+    if (!playerState.syncEnabled || !isSyncSupportedMode(playerState.mode)) {
+      return { ok: false };
+    }
+
+    const syncFilmId = getSyncFilmIdForMode();
+    if (!syncFilmId) {
       return { ok: false };
     }
 
     return sendRuntimeMessage({
       type: 'joinPlayerSync',
       service: playerState.mode,
-      filmId: playerState.filmId
+      filmId: syncFilmId
     }).catch(() => ({ ok: false }));
   }
 
   async function rejoinPlayerSync() {
-    if (!playerState.syncEnabled || !isSyncSupportedMode(playerState.mode) || !playerState.filmId) {
+    if (!playerState.syncEnabled || !isSyncSupportedMode(playerState.mode)) {
+      return { ok: false };
+    }
+
+    const syncFilmId = getSyncFilmIdForMode();
+    if (!syncFilmId) {
       return { ok: false };
     }
 
@@ -316,7 +591,7 @@
     return sendRuntimeMessage({
       type: 'rejoinPlayerSync',
       service: playerState.mode,
-      filmId: playerState.filmId
+      filmId: syncFilmId
     }).catch(() => ({ ok: false }));
   }
 
@@ -386,6 +661,186 @@
     updateSyncUi(overlay);
   }
 
+  function updateRutubeQueueUi(overlay) {
+    if (!overlay) {
+      overlay = document.getElementById(OVERLAY_ID);
+    }
+    if (!overlay) {
+      return;
+    }
+
+    const skipBtn = overlay.querySelector('.ryh-rutube-skip-btn');
+    const queueBadge = overlay.querySelector('.ryh-rutube-queue-count');
+    const queueLen = Array.isArray(playerState.rutubeQueue)
+      ? playerState.rutubeQueue.length
+      : 0;
+
+    if (skipBtn) {
+      skipBtn.disabled = queueLen <= 0;
+      skipBtn.classList.toggle('hidden', playerState.mode !== 'rutube');
+      skipBtn.title =
+        queueLen > 0 ? `Следующее видео (${queueLen} в очереди)` : 'Очередь пуста';
+    }
+
+    if (queueBadge) {
+      queueBadge.textContent = queueLen > 0 ? String(queueLen) : '';
+      queueBadge.classList.toggle('hidden', queueLen <= 0);
+    }
+  }
+
+  async function loadRutubeById(
+    videoId,
+    title = '',
+    { keepQueue = true, broadcast = true } = {}
+  ) {
+    const id = normalizeRutubeVideoId(videoId);
+    if (!id) {
+      return { ok: false, error: 'Некорректный ID Rutube' };
+    }
+
+    clearInitialPlaybackSyncTimers();
+
+    const roomId =
+      playerState.mode === 'rutube' && playerState.rutubeRoomId
+        ? playerState.rutubeRoomId
+        : createRutubeRoomId();
+
+    const preservedQueue =
+      keepQueue && playerState.mode === 'rutube'
+        ? (playerState.rutubeQueue || []).filter((item) => item.id !== id)
+        : [];
+
+    const embedUrl = getRutubeEmbedUrl(id);
+    const pageUrl = getDefaultFilmPageUrl(id, 'rutube');
+    const videoTitle = title || 'Rutube';
+    const result = await replacePlayer({
+      filmId: id,
+      embedUrl,
+      title: videoTitle,
+      pageUrl,
+      players: [
+        {
+          id: 'rutube',
+          name: 'Rutube',
+          type: 'iframe',
+          url: embedUrl
+        }
+      ],
+      activePlayerId: 'rutube',
+      service: 'rutube',
+      rutubeRoomId: roomId,
+      rutubeQueue: preservedQueue
+    });
+
+    if (result?.ok) {
+      playerState.rutubeRoomId = roomId;
+      playerState.rutubeQueue = preservedQueue;
+      await storageSet({ playerState });
+      updateRutubeQueueUi();
+
+      if (broadcast) {
+        await broadcastRutubeSyncEvent(buildRutubeMediaEvent(id, videoTitle));
+        await broadcastRutubePlaylistState();
+        // Align playhead after peers have time to switch media.
+        scheduleInitialPlaybackSync(id);
+      }
+    }
+
+    return result;
+  }
+
+  async function addToRutubeQueue({ videoId, title, videoUrl }) {
+    const id = normalizeRutubeVideoId(videoId || videoUrl);
+    if (!id) {
+      return { ok: false, error: 'Некорректный ID Rutube' };
+    }
+
+    const videoTitle = String(title || '').trim() || 'Rutube';
+
+    if (!playerState.active || playerState.mode !== 'rutube') {
+      const result = await loadRutubeById(id, videoTitle, {
+        keepQueue: false,
+        broadcast: true
+      });
+      if (!result?.ok) {
+        return result;
+      }
+      return { ok: true, started: true, filmId: id, queueLength: 0 };
+    }
+
+    ensureRutubeRoomId();
+
+    if (!playerState.filmId) {
+      const result = await loadRutubeById(id, videoTitle, {
+        keepQueue: true,
+        broadcast: true
+      });
+      if (!result?.ok) {
+        return result;
+      }
+      return {
+        ok: true,
+        started: true,
+        filmId: id,
+        queueLength: (playerState.rutubeQueue || []).length
+      };
+    }
+
+    if (String(playerState.filmId).toLowerCase() === id) {
+      return {
+        ok: true,
+        alreadyPlaying: true,
+        filmId: id,
+        queueLength: (playerState.rutubeQueue || []).length
+      };
+    }
+
+    const queue = Array.isArray(playerState.rutubeQueue)
+      ? [...playerState.rutubeQueue]
+      : [];
+    if (queue.some((item) => item.id === id)) {
+      return {
+        ok: true,
+        alreadyQueued: true,
+        filmId: playerState.filmId,
+        queueLength: queue.length
+      };
+    }
+
+    queue.push({ id, title: videoTitle });
+    playerState.rutubeQueue = queue;
+    await storageSet({ playerState });
+    updateRutubeQueueUi();
+    await broadcastRutubeSyncEvent(buildRutubeQueueEvent(id, videoTitle));
+    await broadcastRutubePlaylistState();
+
+    return {
+      ok: true,
+      queued: true,
+      filmId: playerState.filmId,
+      queueLength: queue.length
+    };
+  }
+
+  async function skipRutubeQueue() {
+    if (playerState.mode !== 'rutube') {
+      return { ok: false, error: 'Rutube не активен' };
+    }
+
+    const queue = Array.isArray(playerState.rutubeQueue)
+      ? [...playerState.rutubeQueue]
+      : [];
+    if (!queue.length) {
+      return { ok: false, error: 'Очередь пуста' };
+    }
+
+    const next = queue.shift();
+    playerState.rutubeQueue = queue;
+    await storageSet({ playerState });
+
+    return loadRutubeById(next.id, next.title, { keepQueue: true, broadcast: true });
+  }
+
   function initSyncMessageListener() {
     window.addEventListener('message', (event) => {
       if (event.source !== window) {
@@ -398,18 +853,171 @@
       }
 
       if (data.type === 'sync-viewers') {
-        playerState.syncViewerCount = Number(data.detail?.count) || 0;
+        const count = Number(data.detail?.count) || 0;
+        const grew = count > lastRutubeViewerCount;
+        playerState.syncViewerCount = count;
         updateSyncUi();
+
+        if (
+          grew &&
+          playerState.mode === 'rutube' &&
+          playerState.syncEnabled &&
+          normalizeRutubeVideoId(playerState.filmId)
+        ) {
+          schedulePushRutubeStateToPeers({ withPlayback: true });
+        }
+        lastRutubeViewerCount = count;
+        return;
+      }
+
+      if (data.type === 'sync-connected') {
+        if (playerState.mode === 'rutube' && playerState.syncEnabled) {
+          if (normalizeRutubeVideoId(playerState.filmId)) {
+            // Share playlist only — avoid play/pause fight on join.
+            schedulePushRutubeStateToPeers({ withPlayback: false });
+          } else {
+            scheduleRutubeStateRequest();
+          }
+        }
+        return;
+      }
+
+      if (data.type === 'remote-rutube') {
+        handleRemoteRutubeEvent(data.detail?.event || '').catch(() => {});
         return;
       }
 
       if (data.type === 'sync-disconnected') {
         if (playerState.syncEnabled) {
           playerState.syncViewerCount = 0;
+          lastRutubeViewerCount = 0;
           updateSyncUi();
         }
       }
     });
+  }
+
+  let pendingRemoteRutubeEvents = [];
+
+  async function handleRemoteRutubeEvent(rawEvent) {
+    if (playerState.mode !== 'rutube') {
+      return;
+    }
+
+    const eventName = String(rawEvent || '');
+    if (!eventName.startsWith('rutube_')) {
+      return;
+    }
+
+    if (applyingRemoteRutube) {
+      pendingRemoteRutubeEvents.push(eventName);
+      return;
+    }
+
+    applyingRemoteRutube = true;
+    try {
+      await processRemoteRutubeEvent(eventName);
+    } finally {
+      applyingRemoteRutube = false;
+      const next = pendingRemoteRutubeEvents.shift();
+      if (next) {
+        handleRemoteRutubeEvent(next).catch(() => {});
+      }
+    }
+  }
+
+  async function processRemoteRutubeEvent(eventName) {
+    if (eventName === 'rutube_request_state' || eventName.startsWith('rutube_request_state')) {
+      if (normalizeRutubeVideoId(playerState.filmId)) {
+        schedulePushRutubeStateToPeers({ withPlayback: true });
+      }
+      return;
+    }
+
+    if (eventName.startsWith('rutube_media:')) {
+      const parts = eventName.split(':');
+      const videoId = normalizeRutubeVideoId(parts[1] || '');
+      const title = decodeRutubeTitle(parts.slice(2).join(':'));
+      if (!videoId) {
+        return;
+      }
+      if (normalizeRutubeVideoId(playerState.filmId) === videoId) {
+        return;
+      }
+
+      await loadRutubeById(videoId, title, { keepQueue: true, broadcast: false });
+      return;
+    }
+
+    if (eventName.startsWith('rutube_queue:')) {
+      const parts = eventName.split(':');
+      const videoId = normalizeRutubeVideoId(parts[1] || '');
+      const title = decodeRutubeTitle(parts.slice(2).join(':'));
+      if (!videoId) {
+        return;
+      }
+      if (normalizeRutubeVideoId(playerState.filmId) === videoId) {
+        return;
+      }
+
+      // Empty room: first "queue" item should become the current video.
+      if (!normalizeRutubeVideoId(playerState.filmId)) {
+        await loadRutubeById(videoId, title, { keepQueue: true, broadcast: false });
+        return;
+      }
+
+      const queue = Array.isArray(playerState.rutubeQueue)
+        ? [...playerState.rutubeQueue]
+        : [];
+      if (queue.some((item) => item.id === videoId)) {
+        return;
+      }
+
+      queue.push({ id: videoId, title });
+      playerState.rutubeQueue = queue;
+      await storageSet({ playerState });
+      updateRutubeQueueUi();
+      return;
+    }
+
+    if (eventName.startsWith('rutube_state:')) {
+      const parts = eventName.split(':');
+      const currentId = parts[1] === '-' ? '' : normalizeRutubeVideoId(parts[1] || '');
+      const queueIds = String(parts[2] || '')
+        .split(',')
+        .map((id) => normalizeRutubeVideoId(id))
+        .filter(Boolean);
+
+      if (!currentId) {
+        if (normalizeRutubeVideoId(playerState.filmId)) {
+          return;
+        }
+        if (queueIds.length) {
+          // Empty room received playlist without current — start the first item.
+          const [firstId, ...restIds] = queueIds;
+          playerState.rutubeQueue = restIds.map((id) => ({ id, title: 'Rutube' }));
+          await loadRutubeById(firstId, 'Rutube', {
+            keepQueue: true,
+            broadcast: false
+          });
+        }
+        return;
+      }
+
+      playerState.rutubeQueue = queueIds
+        .filter((id) => id !== currentId)
+        .map((id) => ({ id, title: 'Rutube' }));
+
+      if (normalizeRutubeVideoId(playerState.filmId) !== currentId) {
+        await loadRutubeById(currentId, 'Rutube', {
+          keepQueue: true,
+          broadcast: false
+        });
+      } else {
+        await storageSet({ playerState });
+        updateRutubeQueueUi();
+      }
+    }
   }
 
   let sourceMenuCloser = null;
@@ -1136,7 +1744,9 @@
 
     const activePlayer = players.find((item) => item.id === activePlayerId) || players[0];
     const hasMultipleSources = players.length > 1;
-    const showSyncUi = isSyncSupportedMode(service || playerState.mode);
+    const filmService = service || playerState.mode;
+    const showSyncUi = isSyncSupportedMode(filmService);
+    const showRutubeQueueUi = filmService === 'rutube';
 
     const overlay = document.createElement('div');
     overlay.id = OVERLAY_ID;
@@ -1158,6 +1768,16 @@
                     <button type="button" class="ryh-seek-btn ryh-seek-forward" title="+10 сек">+10</button>
                   </div>
                 </div>`
+              : ''
+          }
+          ${
+            showRutubeQueueUi
+              ? `<button type="button" class="ryh-rutube-skip-btn" title="Следующее видео" aria-label="Следующее видео">
+                  <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true">
+                    <path fill="currentColor" d="M5 5v14h2V5H5zm12 0v14l7-7-7-7z"/>
+                  </svg>
+                  <span class="ryh-rutube-queue-count hidden"></span>
+                </button>`
               : ''
           }
           ${
@@ -1203,6 +1823,25 @@
 
     if (showSyncUi) {
       bindSyncControls(overlay);
+    }
+
+    if (showRutubeQueueUi) {
+      overlay.querySelector('.ryh-rutube-skip-btn')?.addEventListener('click', () => {
+        skipRutubeQueue().catch((error) => {
+          const titleEl = overlay.querySelector('.ryh-player-title');
+          if (!titleEl) {
+            return;
+          }
+          const previous = titleEl.textContent;
+          titleEl.textContent = error?.message || 'Очередь пуста';
+          window.setTimeout(() => {
+            if (titleEl.textContent === (error?.message || 'Очередь пуста')) {
+              titleEl.textContent = previous;
+            }
+          }, 2500);
+        });
+      });
+      updateRutubeQueueUi(overlay);
     }
 
     if (hasMultipleSources) {
@@ -1295,6 +1934,160 @@
     return { ok: true, title: playerState.title, roomUrl: resolvedRoomUrl };
   }
 
+  async function createRutubePlaceholderOverlay(container) {
+    removeOverlay();
+
+    const computed = window.getComputedStyle(container);
+    if (computed.position === 'static') {
+      container.style.position = 'relative';
+    }
+
+    const overlay = document.createElement('div');
+    overlay.id = OVERLAY_ID;
+    overlay.className = 'ryh-player-overlay ryh-rutube-overlay';
+    overlay.innerHTML = `
+      <div class="ryh-player-bar">
+        <span class="ryh-player-title">Rutube</span>
+        <div class="ryh-bar-actions">
+          <div class="ryh-sync-wrap">
+            <label class="ryh-sync-toggle" title="Синхронизировать перемотку с другими зрителями">
+              <input type="checkbox" class="ryh-sync-checkbox" />
+              <span class="ryh-sync-label">Синхр.</span>
+            </label>
+            <span class="ryh-sync-viewers hidden"></span>
+            <div class="ryh-sync-seek-wrap hidden">
+              <button type="button" class="ryh-seek-btn ryh-seek-back" title="−10 сек">−10</button>
+              <button type="button" class="ryh-seek-btn ryh-seek-forward" title="+10 сек">+10</button>
+            </div>
+          </div>
+          <button type="button" class="ryh-rutube-skip-btn hidden" title="Следующее видео" aria-label="Следующее видео">
+            <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true">
+              <path fill="currentColor" d="M5 5v14h2V5H5zm12 0v14l7-7-7-7z"/>
+            </svg>
+            <span class="ryh-rutube-queue-count hidden"></span>
+          </button>
+          <button type="button" class="ryh-restore-btn" title="Вернуть Twitch" aria-label="Вернуть Twitch"><span aria-hidden="true">×</span></button>
+        </div>
+      </div>
+      <div class="ryh-player-body">
+        <div class="ryh-rutube-placeholder">
+          <div class="ryh-rutube-placeholder-title">Rutube</div>
+          <div class="ryh-rutube-placeholder-text">
+            Откройте видео на rutube.ru и нажмите «В очередь»
+          </div>
+        </div>
+        <iframe
+          class="ryh-player-frame ryh-hidden"
+          src="about:blank"
+          allowfullscreen
+          allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
+          referrerpolicy="origin"
+        ></iframe>
+      </div>
+    `;
+
+    overlay.querySelector('.ryh-restore-btn').addEventListener('click', () => {
+      restorePlayer();
+    });
+
+    bindSyncControls(overlay);
+    overlay.querySelector('.ryh-rutube-skip-btn')?.addEventListener('click', () => {
+      skipRutubeQueue().catch(() => {});
+    });
+    bindAutoHideControls(overlay);
+    container.appendChild(overlay);
+    pauseTwitchVideo();
+    updateRutubeQueueUi(overlay);
+  }
+
+  async function replaceRutubePlayer({ rutubeRoomId, filmId } = {}) {
+    let container = findPlayerContainer();
+    if (!container) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      container = findPlayerContainer();
+    }
+
+    if (!container) {
+      return { ok: false, error: 'Плеер Twitch не найден. Обновите страницу.' };
+    }
+
+    cancelPendingPlayerLoads();
+    await disconnectWatchParty();
+
+    if (syncBridgeTimer) {
+      clearTimeout(syncBridgeTimer);
+      syncBridgeTimer = null;
+    }
+    await leavePlayerSync();
+
+    if (playerState.mode === 'youtube') {
+      await sendRuntimeMessage({ type: 'clearYoutubeRoom' }).catch(() => {});
+      await storageRemove('youtubeRoomState');
+    }
+
+    const joiningExistingRoom = Boolean(String(rutubeRoomId || '').trim());
+    const storedSync = await storageGet(['playerSyncEnabled']);
+    const syncEnabled = joiningExistingRoom
+      ? true
+      : typeof storedSync.playerSyncEnabled === 'boolean'
+        ? storedSync.playerSyncEnabled
+        : true;
+
+    const roomId = String(rutubeRoomId || '').trim() || createRutubeRoomId();
+    const joinVideoId = normalizeRutubeVideoId(filmId);
+
+    await createRutubePlaceholderOverlay(container);
+
+    playerState = {
+      active: true,
+      mode: 'rutube',
+      filmId: null,
+      title: 'Rutube',
+      embedUrl: '',
+      pageUrl: '',
+      roomId: '',
+      roomUrl: '',
+      players: [],
+      activePlayerId: '',
+      syncEnabled,
+      syncViewerCount: 0,
+      rutubeQueue: [],
+      rutubeRoomId: roomId
+    };
+    lastRutubeViewerCount = 0;
+
+    await storageSet({ playerState, playerSyncEnabled: syncEnabled });
+    updateSyncUi();
+
+    if (syncEnabled) {
+      scheduleSyncBridgeJoin();
+    }
+
+    if (joinVideoId) {
+      await loadRutubeById(joinVideoId, 'Rutube', {
+        keepQueue: false,
+        broadcast: false
+      });
+      scheduleRutubePlaybackPull();
+    }
+
+    if (joiningExistingRoom && syncEnabled) {
+      if (!joinVideoId) {
+        scheduleRutubeStateRequest();
+      } else {
+        scheduleRutubePlaybackPull();
+      }
+    }
+
+    return {
+      ok: true,
+      title: 'Rutube',
+      filmId: joinVideoId || null,
+      syncEnabled,
+      rutubeRoomId: roomId
+    };
+  }
+
   async function replacePlayer({
     filmId,
     embedUrl,
@@ -1302,7 +2095,9 @@
     pageUrl,
     players,
     activePlayerId,
-    service
+    service,
+    rutubeRoomId,
+    rutubeQueue
   }) {
     cancelPendingPlayerLoads();
 
@@ -1350,11 +2145,24 @@
       await disconnectWatchParty();
     }
 
+    const nextRutubeRoomId =
+      filmService === 'rutube'
+        ? String(rutubeRoomId || playerState.rutubeRoomId || '').trim() || createRutubeRoomId()
+        : '';
+    const keepRutubeSync =
+      filmService === 'rutube' &&
+      playerState.mode === 'rutube' &&
+      playerState.syncEnabled &&
+      Boolean(playerState.rutubeRoomId) &&
+      playerState.rutubeRoomId === nextRutubeRoomId;
+
     if (syncBridgeTimer) {
       clearTimeout(syncBridgeTimer);
       syncBridgeTimer = null;
     }
-    await leavePlayerSync();
+    if (!keepRutubeSync) {
+      await leavePlayerSync();
+    }
 
     const storedSync = await storageGet(['playerSyncEnabled']);
     const syncEnabled =
@@ -1364,6 +2172,13 @@
         : Boolean(playerState.syncEnabled));
 
     playerState.syncEnabled = syncEnabled;
+
+    const nextQueue =
+      filmService === 'rutube'
+        ? Array.isArray(rutubeQueue)
+          ? rutubeQueue
+          : playerState.rutubeQueue || []
+        : [];
 
     try {
       await createOverlay(container, {
@@ -1391,13 +2206,24 @@
       players: sources,
       activePlayerId: activeId,
       syncEnabled,
-      syncViewerCount: 0
+      syncViewerCount: keepRutubeSync ? playerState.syncViewerCount : 0,
+      rutubeQueue: nextQueue,
+      rutubeRoomId: nextRutubeRoomId
     };
 
     await storageSet({ playerState, playerSyncEnabled: syncEnabled });
 
     if (playerState.syncEnabled) {
-      scheduleSyncBridgeJoin();
+      if (keepRutubeSync) {
+        window.setTimeout(() => {
+          sendRuntimeMessage({ type: 'ensurePlayerBridgeInTab' }).catch(() => {});
+        }, 700);
+        window.setTimeout(() => {
+          sendRuntimeMessage({ type: 'ensurePlayerBridgeInTab' }).catch(() => {});
+        }, 1800);
+      } else {
+        scheduleSyncBridgeJoin();
+      }
     }
 
     return { ok: true, title: playerState.title };
@@ -1425,8 +2251,11 @@
       players: [],
       activePlayerId: '',
       syncEnabled: false,
-      syncViewerCount: 0
+      syncViewerCount: 0,
+      rutubeQueue: [],
+      rutubeRoomId: ''
     };
+    lastRutubeViewerCount = 0;
     await storageSet({ playerState });
     if (wasYoutube) {
       await storageRemove('youtubeRoomState');
@@ -1439,6 +2268,10 @@
     cancelPendingPlayerLoads();
 
     const resolvedService = resolveFilmService(filmId, service);
+    if (resolvedService === 'rutube') {
+      return loadRutubeById(filmId, '', { keepQueue: false });
+    }
+
     const response = await sendRuntimeMessage({
       type: 'getPlayerEmbed',
       filmId,
@@ -1569,7 +2402,8 @@
         const filmId = target.dataset.filmId;
         const filmService = target.dataset.filmService;
         const roomSlug = target.dataset.roomSlug;
-        if (!filmId && !roomSlug) {
+        const rutubeRoomId = target.dataset.rutubeRoomId;
+        if (!filmId && !roomSlug && !rutubeRoomId) {
           return;
         }
 
@@ -1583,9 +2417,19 @@
         target.classList.add('ryh-chat-link-loading');
         const linkFilmId = filmId;
         const linkService = filmService || resolveFilmService(filmId);
+        const linkRutubeRoomId = rutubeRoomId;
         window.setTimeout(async () => {
           try {
-            if (linkFilmId) {
+            if (linkRutubeRoomId) {
+              const result = await replaceRutubePlayer({
+                rutubeRoomId: linkRutubeRoomId,
+                filmId:
+                  linkService === 'rutube' ? normalizeRutubeVideoId(linkFilmId) : ''
+              });
+              if (!result?.ok) {
+                console.warn('[RYH] Не удалось войти в Rutube комнату:', result?.error);
+              }
+            } else if (linkFilmId) {
               const result = await loadFilmById(linkFilmId, linkService);
               if (!result?.ok) {
                 console.warn('[RYH] Не удалось загрузить фильм:', result?.error);
@@ -1663,6 +2507,27 @@
     });
   }
 
+  function markRutubeAnchors(root) {
+    deepQueryAll(
+      root,
+      'a[href*="rutube.ru/video/"], a[href*="rutube.ru/play/embed/"]'
+    ).forEach((anchor) => {
+      if (anchor.classList.contains('ryh-chat-link')) {
+        return;
+      }
+
+      const videoId = normalizeRutubeVideoId(anchor.href);
+      if (!videoId) {
+        return;
+      }
+
+      anchor.classList.add('ryh-chat-link');
+      anchor.dataset.filmId = videoId;
+      anchor.dataset.filmService = 'rutube';
+      anchor.title = `Смотреть на Rutube (${videoId.slice(0, 8)}…)`;
+    });
+  }
+
   function parseRyhShortLink(match) {
     const token = match[1];
     if (/^\d+$/.test(token)) {
@@ -1698,6 +2563,38 @@
       index: match.index,
       filmId: kpId,
       slug: null
+    };
+  }
+
+  function parseRutubeShortLink(match) {
+    const bareVideoId = String(match[1] || '').toLowerCase();
+    const roomToken = String(match[2] || '').toLowerCase();
+    const roomVideoId = String(match[3] || '').toLowerCase();
+
+    if (/^[a-f0-9]{32}$/.test(bareVideoId)) {
+      return {
+        type: 'film',
+        service: 'rutube',
+        fullMatch: match[0],
+        index: match.index,
+        filmId: bareVideoId,
+        slug: null,
+        rutubeRoomId: null
+      };
+    }
+
+    if (!/^[a-z0-9]{8,16}$/.test(roomToken)) {
+      return null;
+    }
+
+    return {
+      type: 'rutube_room',
+      service: 'rutube',
+      fullMatch: match[0],
+      index: match.index,
+      filmId: /^[a-f0-9]{32}$/.test(roomVideoId) ? roomVideoId : null,
+      slug: roomToken,
+      rutubeRoomId: roomToken
     };
   }
 
@@ -1772,6 +2669,15 @@
       }
     }
 
+    RUTUBE_SHORT_PATTERN.lastIndex = 0;
+    const rutubeMatch = RUTUBE_SHORT_PATTERN.exec(text);
+    if (rutubeMatch) {
+      const item = parseRutubeShortLink(rutubeMatch);
+      if (item && (!best || item.index < best.index)) {
+        best = item;
+      }
+    }
+
     return best;
   }
 
@@ -1812,6 +2718,16 @@
       element.dataset.filmId = linkInfo.filmId;
       element.dataset.filmService = linkInfo.service || 'reyohoho';
       element.title = `Смотреть на ${getServiceLabel(linkInfo.service || 'reyohoho')} (${linkInfo.filmId})`;
+      return;
+    }
+
+    if (linkInfo.type === 'rutube_room') {
+      element.dataset.rutubeRoomId = linkInfo.rutubeRoomId || linkInfo.slug;
+      if (linkInfo.filmId) {
+        element.dataset.filmId = linkInfo.filmId;
+        element.dataset.filmService = 'rutube';
+      }
+      element.title = `Присоединиться к Rutube (${linkInfo.rutubeRoomId || linkInfo.slug})`;
       return;
     }
 
@@ -1867,6 +2783,7 @@
       markReyohohoAnchors(root);
       markAprelAnchors(root);
       markMatrixAnchors(root);
+      markRutubeAnchors(root);
       markWatchpartyAnchors(root);
       markChatMessagesByOriginalText(root);
 
@@ -1995,6 +2912,13 @@
       link.dataset.filmId = linkInfo.filmId;
       link.dataset.filmService = linkInfo.service || 'reyohoho';
       link.title = `Смотреть на ${getServiceLabel(linkInfo.service || 'reyohoho')} (${linkInfo.filmId})`;
+    } else if (linkInfo.type === 'rutube_room') {
+      link.dataset.rutubeRoomId = linkInfo.rutubeRoomId || linkInfo.slug;
+      if (linkInfo.filmId) {
+        link.dataset.filmId = linkInfo.filmId;
+        link.dataset.filmService = 'rutube';
+      }
+      link.title = `Присоединиться к Rutube (${linkInfo.rutubeRoomId || linkInfo.slug})`;
     } else {
       link.dataset.roomSlug = linkInfo.slug;
       link.title = `Присоединиться к WatchParty (${linkInfo.slug})`;
@@ -2421,6 +3345,13 @@
       return true;
     }
 
+    if (message.type === 'replaceRutubePlayer') {
+      replaceRutubePlayer(message)
+        .then(sendResponse)
+        .catch((error) => sendResponse({ ok: false, error: error.message }));
+      return true;
+    }
+
     if (message.type === 'restorePlayer') {
       restorePlayer()
         .then(sendResponse)
@@ -2441,7 +3372,11 @@
           filmId: playerState.filmId,
           roomId: playerState.roomId,
           roomUrl: playerState.roomUrl,
-          syncEnabled: playerState.syncEnabled
+          syncEnabled: playerState.syncEnabled,
+          queueLength: Array.isArray(playerState.rutubeQueue)
+            ? playerState.rutubeQueue.length
+            : 0,
+          rutubeRoomId: playerState.rutubeRoomId || ''
         });
       })().catch(() => {
         sendResponse({
@@ -2451,9 +3386,27 @@
           filmId: playerState.filmId,
           roomId: playerState.roomId,
           roomUrl: playerState.roomUrl,
-          syncEnabled: playerState.syncEnabled
+          syncEnabled: playerState.syncEnabled,
+          queueLength: Array.isArray(playerState.rutubeQueue)
+            ? playerState.rutubeQueue.length
+            : 0,
+          rutubeRoomId: playerState.rutubeRoomId || ''
         });
       });
+      return true;
+    }
+
+    if (message.type === 'addToRutubeQueue') {
+      addToRutubeQueue(message)
+        .then(sendResponse)
+        .catch((error) => sendResponse({ ok: false, error: error.message }));
+      return true;
+    }
+
+    if (message.type === 'skipRutubeQueue') {
+      skipRutubeQueue()
+        .then(sendResponse)
+        .catch((error) => sendResponse({ ok: false, error: error.message }));
       return true;
     }
 
@@ -2528,6 +3481,50 @@
         return;
       }
 
+      if (stored.playerState.mode === 'rutube' && !stored.playerState.filmId) {
+        playerState = {
+          ...stored.playerState,
+          filmId: null,
+          syncEnabled: Boolean(stored.playerState.syncEnabled),
+          syncViewerCount: 0,
+          rutubeQueue: Array.isArray(stored.playerState.rutubeQueue)
+            ? stored.playerState.rutubeQueue
+            : [],
+          rutubeRoomId: stored.playerState.rutubeRoomId || createRutubeRoomId()
+        };
+        lastRutubeViewerCount = 0;
+
+        const restoreToken = restoreLoadToken;
+        const tryRestore = async (attempt = 0) => {
+          if (restoreToken !== restoreLoadToken) {
+            return;
+          }
+
+          const container = findPlayerContainer();
+          if (container) {
+            try {
+              await createRutubePlaceholderOverlay(container);
+              updateSyncUi();
+              if (playerState.syncEnabled) {
+                scheduleSyncBridgeJoin();
+              }
+            } catch {
+              return;
+            }
+            return;
+          }
+
+          if (attempt < 20) {
+            setTimeout(() => {
+              tryRestore(attempt + 1).catch(() => {});
+            }, 500);
+          }
+        };
+
+        tryRestore().catch(() => {});
+        return;
+      }
+
       if (!stored.playerState.embedUrl && !stored.playerState.pageUrl) {
         return;
       }
@@ -2535,7 +3532,14 @@
       playerState = {
         ...stored.playerState,
         syncEnabled: Boolean(stored.playerState.syncEnabled),
-        syncViewerCount: 0
+        syncViewerCount: 0,
+        rutubeQueue: Array.isArray(stored.playerState.rutubeQueue)
+          ? stored.playerState.rutubeQueue
+          : [],
+        rutubeRoomId:
+          stored.playerState.mode === 'rutube'
+            ? stored.playerState.rutubeRoomId || createRutubeRoomId()
+            : ''
       };
       const filmService = resolveFilmService(playerState.filmId, playerState.mode);
       const restoreToken = restoreLoadToken;
@@ -2576,6 +3580,10 @@
           if (restoreToken !== restoreLoadToken) {
             removeOverlay();
             return;
+          }
+
+          if (filmService === 'rutube') {
+            updateRutubeQueueUi();
           }
 
           if (playerState.syncEnabled) {
