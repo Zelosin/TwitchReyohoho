@@ -4,11 +4,11 @@
 
   "name": "Twitch ReYohoho",
 
-  "version": "1.5.50",
+  "version": "1.5.51",
 
   "description": "Замена плеера Twitch на плеер ReYohoho с поиском фильмов и подсветкой ссылок в чате",
 
-  "permissions": ["activeTab", "storage", "scripting", "webNavigation"],
+  "permissions": ["activeTab", "storage", "scripting", "webNavigation", "alarms", "notifications", "windows"],
 
   "host_permissions": [
 
@@ -68,7 +68,9 @@
 
     "https://www.wikidata.org/*",
 
-    "https://query.wikidata.org/*"
+    "https://query.wikidata.org/*",
+
+    "https://suseqa.moe/*"
 
   ],
 

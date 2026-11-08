@@ -1,9 +1,65 @@
+#ryh-pih-live-banner {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 2147483646;
+  pointer-events: auto;
+}
+
+.ryh-pih-live-card {
+  width: 280px;
+  padding: 14px 14px 12px;
+  border: 1px solid #3a3a3d;
+  border-radius: 10px;
+  background: #0e0e10;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  color: #efeff1;
+  font-family: 'Segoe UI', sans-serif;
+}
+
+.ryh-pih-live-title {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.ryh-pih-live-text {
+  margin-top: 4px;
+  color: #adadb8;
+  font-size: 13px;
+}
+
+.ryh-pih-live-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.ryh-pih-live-actions button {
+  border: none;
+  border-radius: 6px;
+  padding: 7px 12px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.ryh-pih-live-watch {
+  background: #9147ff;
+  color: #fff;
+}
+
+.ryh-pih-live-close {
+  background: #3a3a3d;
+  color: #efeff1;
+}
+
 .ryh-player-overlay {
   position: absolute !important;
   inset: 0 !important;
   z-index: 999999 !important;
   display: flex !important;
   flex-direction: column;
+  overflow: hidden;
   background: #0e0e10;
   pointer-events: auto;
 }
@@ -245,6 +301,7 @@
   flex: 1;
   position: relative;
   min-height: 0;
+  overflow: hidden;
   background: #000;
 }
 
@@ -255,6 +312,11 @@
   height: 100%;
   border: none;
   background: #000;
+}
+
+.ryh-player-body.ryh-clip-scroll .ryh-player-frame {
+  right: auto;
+  width: calc(100% + 18px);
 }
 
 .ryh-player-frame.ryh-hidden {

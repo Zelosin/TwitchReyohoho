@@ -7,6 +7,7 @@ const copyRoomLinkBtn = document.getElementById('copyRoomLinkBtn');
 const replaceBtn = document.getElementById('replaceBtn');
 const replaceYoutubeBtn = document.getElementById('replaceYoutubeBtn');
 const replaceRutubeBtn = document.getElementById('replaceRutubeBtn');
+const replacePihBtn = document.getElementById('replacePihBtn');
 const restoreBtn = document.getElementById('restoreBtn');
 const statusBadge = document.getElementById('statusBadge');
 const messageEl = document.getElementById('message');
@@ -328,6 +329,26 @@ function setYoutubeReplaceLoading(loading) {
 function setRutubeReplaceLoading(loading) {
   replaceRutubeBtn.disabled = loading;
   replaceRutubeBtn.textContent = loading ? 'Загрузка...' : 'Заменить на Rutube';
+}
+
+function setPihReplaceLoading(loading) {
+  replacePihBtn.disabled = loading;
+  replacePihBtn.textContent = loading ? 'Подключение...' : 'PIH';
+}
+
+function setPihActive(active) {
+  statusBadge.textContent = active ? 'PIH' : 'Twitch';
+  statusBadge.className = `badge${active ? ' pih' : ''}`;
+  restoreBtn.classList.toggle('hidden', !active);
+  updateSyncToggleUi(false, 'pih', false);
+  if (active) {
+    clearYoutubeRoomSelection();
+    selectedFilm = null;
+    selectedFilmEl.classList.add('hidden');
+    selectedFilmTitle.textContent = '';
+    activePlayerFilmId = null;
+    updateReplaceButton();
+  }
 }
 
 function isStaleContentScriptError(error) {
@@ -745,6 +766,25 @@ replaceYoutubeBtn.addEventListener('click', async () => {
   }
 });
 
+replacePihBtn.addEventListener('click', async () => {
+  setPihReplaceLoading(true);
+  showMessage('Подключение к PIH...', '');
+
+  try {
+    const response = await sendToContentScript('replacePihPlayer');
+    if (!response?.ok) {
+      throw new Error(response?.error || 'Не удалось заменить плеер');
+    }
+
+    setPihActive(true);
+    showMessage('Сейчас: PIH', 'success');
+  } catch (error) {
+    showMessage(error.message, 'error');
+  } finally {
+    setPihReplaceLoading(false);
+  }
+});
+
 replaceRutubeBtn.addEventListener('click', async () => {
   setRutubeReplaceLoading(true);
   showMessage('Запуск Rutube...', '');
@@ -792,6 +832,8 @@ restoreBtn.addEventListener('click', async () => {
       if (stateResponse?.mode === 'youtube') {
         await runtimeMessage({ type: 'clearYoutubeRoom' });
         setYoutubeActive(false);
+      } else if (stateResponse?.mode === 'pih') {
+        setPihActive(false);
       } else {
         setFilmActive(false, stateResponse?.mode === 'aprel' ? 'aprel' : stateResponse?.mode === 'matrix' ? 'matrix' : stateResponse?.mode === 'rutube' ? 'rutube' : 'reyohoho');
       }
@@ -852,6 +894,10 @@ async function syncState() {
           : 'Rutube готов. Добавляйте видео кнопкой «В очередь» на rutube.ru.',
         'success'
       );
+    } else if (response?.active && response.mode === 'pih') {
+      clearYoutubeRoomSelection();
+      setPihActive(true);
+      showMessage('Сейчас: PIH', 'success');
     } else if (response?.active && response.filmId) {
       clearYoutubeRoomSelection();
       const service =

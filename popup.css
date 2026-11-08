@@ -357,6 +357,25 @@ input[type='text']:focus {
   opacity: 0.9;
 }
 
+.btn-pih {
+  background: #6b7280;
+  color: #f4f4f5;
+}
+
+.btn-pih:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn-pih:not(:disabled):hover {
+  background: #52525b;
+}
+
+.badge.pih {
+  background: #3f3f46;
+  color: #e4e4e7;
+}
+
 .badge.youtube {
   background: #4a1515;
   color: #ff6b6b;

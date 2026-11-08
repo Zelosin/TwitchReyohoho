@@ -2246,3 +2246,137 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   return false;
 });
+
+const PIH_ORIGIN = 'https://suseqa.moe';
+const PIH_ALARM = 'pih-live-poll';
+
+let pihPollInFlight = false;
+
+function ensurePihAlarm() {
+  chrome.alarms.create(PIH_ALARM, { periodInMinutes: 0.5 });
+}
+
+async function pollPihLive() {
+  if (pihPollInFlight) {
+    return;
+  }
+  pihPollInFlight = true;
+  try {
+    await chrome.storage.local.set({ pihLastPollAt: Date.now() });
+    const response = await fetch(`${PIH_ORIGIN}/api/live/status`, {
+      method: 'GET',
+      cache: 'no-store',
+      headers: { Accept: 'application/json' }
+    });
+    if (!response.ok) {
+      return;
+    }
+
+    const data = await response.json();
+    if (!data?.live || !data.sessionId) {
+      chrome.action.setBadgeText({ text: '' }).catch(() => {});
+      return;
+    }
+
+    const sessionId = String(data.sessionId);
+    const stored = await chrome.storage.local.get('pihDesktopSessionId');
+    if (stored.pihDesktopSessionId === sessionId) {
+      return;
+    }
+
+    await presentPihLive(sessionId);
+    await chrome.storage.local.set({ pihDesktopSessionId: sessionId });
+  } catch {
+    /* сайт недоступен или уведомления запрещены — следующая проверка повторит */
+  } finally {
+    pihPollInFlight = false;
+  }
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === PIH_ALARM) {
+    return pollPihLive();
+  }
+});
+
+async function presentPihLive(sessionId) {
+  chrome.action.setBadgeBackgroundColor({ color: '#9147ff' }).catch(() => {});
+  chrome.action.setBadgeText({ text: 'LIVE' }).catch(() => {});
+
+  chrome.notifications
+    .create(`pih-live-${sessionId}`, {
+      type: 'basic',
+      iconUrl: 'icons/icon128.png',
+      title: 'PIH',
+      message: 'Трансляция началась',
+      requireInteraction: true
+    })
+    .catch(() => {});
+
+  const tabs = await chrome.tabs.query({
+    url: ['https://www.twitch.tv/*', 'https://twitch.tv/*']
+  });
+  let shownOnTwitch = 0;
+  await Promise.all(
+    tabs.map(async (tab) => {
+      if (!tab.id) {
+        return;
+      }
+      try {
+        const response = await chrome.tabs.sendMessage(tab.id, {
+          type: 'pihLiveStarted',
+          sessionId
+        });
+        if (response?.ok) {
+          shownOnTwitch += 1;
+        }
+      } catch {
+        /* на этой вкладке ещё нет скрипта */
+      }
+    })
+  );
+
+  if (shownOnTwitch > 0) {
+    return;
+  }
+
+  const noticeUrl = chrome.runtime.getURL('pih-notice.html');
+  try {
+    const open = await chrome.windows.getAll({ populate: true, windowTypes: ['popup'] });
+    const already = open.some((win) =>
+      (win.tabs || []).some((tab) => tab.url === noticeUrl)
+    );
+    if (already) {
+      return;
+    }
+  } catch {
+    /* список окон недоступен — окно всё равно откроем */
+  }
+
+  await chrome.windows.create({
+    url: noticeUrl,
+    type: 'popup',
+    width: 380,
+    height: 168,
+    focused: true
+  });
+}
+
+chrome.notifications.onClicked.addListener((notificationId) => {
+  if (!String(notificationId).startsWith('pih-live')) {
+    return;
+  }
+  chrome.tabs.create({ url: `${PIH_ORIGIN}/live` });
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  ensurePihAlarm();
+  return pollPihLive();
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  ensurePihAlarm();
+  return pollPihLive();
+});
+
+ensurePihAlarm();

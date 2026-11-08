@@ -39,6 +39,7 @@
   }
 
   const OVERLAY_ID = 'ryh-player-overlay';
+  const PIH_LIVE_URL = 'https://suseqa.moe/live';
 
   const PLAYER_SELECTORS = [
     '[data-a-target="video-player"]',
@@ -165,7 +166,8 @@
     reyohoho: 'ReYohoho',
     aprel: 'Aprel Kino',
     matrix: 'Matrix',
-    rutube: 'Rutube'
+    rutube: 'Rutube',
+    pih: 'PIH'
   };
 
   function getServiceLabel(service) {
@@ -177,7 +179,8 @@
       service === 'aprel' ||
       service === 'reyohoho' ||
       service === 'matrix' ||
-      service === 'rutube'
+      service === 'rutube' ||
+      service === 'pih'
     ) {
       return service;
     }
@@ -193,6 +196,9 @@
 
   function getDefaultFilmPageUrl(filmId, service) {
     const resolvedService = resolveFilmService(filmId, service);
+    if (resolvedService === 'pih') {
+      return PIH_LIVE_URL;
+    }
     if (resolvedService === 'matrix') {
       const kpId = String(filmId || '').replace(/\D/g, '');
       return `https://gokino.by/matrix/search.php?q=${kpId}`;
@@ -1806,10 +1812,11 @@
           <button type="button" class="ryh-restore-btn" title="Вернуть Twitch" aria-label="Вернуть Twitch"><span aria-hidden="true">×</span></button>
         </div>
       </div>
-      <div class="ryh-player-body">
+      <div class="ryh-player-body${filmService === 'pih' ? ' ryh-clip-scroll' : ''}">
         <iframe
           class="ryh-player-frame"
           src="about:blank"
+          scrolling="no"
           allowfullscreen
           allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
           referrerpolicy="origin"
@@ -3330,7 +3337,58 @@
     }, 2000);
   }
 
+  async function replacePihPlayer() {
+    return replacePlayer({
+      filmId: 'pih',
+      embedUrl: PIH_LIVE_URL,
+      title: 'PIH',
+      pageUrl: PIH_LIVE_URL,
+      players: [
+        {
+          id: 'pih',
+          name: 'PIH',
+          type: 'iframe',
+          url: PIH_LIVE_URL
+        }
+      ],
+      activePlayerId: 'pih',
+      service: 'pih'
+    });
+  }
+
+  function showPihLiveBanner() {
+    let banner = document.getElementById('ryh-pih-live-banner');
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.id = 'ryh-pih-live-banner';
+      banner.innerHTML = `
+        <div class="ryh-pih-live-card">
+          <div class="ryh-pih-live-title">PIH</div>
+          <div class="ryh-pih-live-text">Трансляция началась</div>
+          <div class="ryh-pih-live-actions">
+            <button type="button" class="ryh-pih-live-watch">Смотреть</button>
+            <button type="button" class="ryh-pih-live-close">Закрыть</button>
+          </div>
+        </div>
+      `;
+      document.documentElement.appendChild(banner);
+      banner.querySelector('.ryh-pih-live-watch').addEventListener('click', () => {
+        banner.remove();
+        replacePihPlayer().catch(() => {});
+      });
+      banner.querySelector('.ryh-pih-live-close').addEventListener('click', () => {
+        banner.remove();
+      });
+    }
+  }
+
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message.type === 'pihLiveStarted') {
+      showPihLiveBanner();
+      sendResponse({ ok: true });
+      return false;
+    }
+
     if (message.type === 'replacePlayer') {
       replacePlayer(message)
         .then(sendResponse)
@@ -3347,6 +3405,13 @@
 
     if (message.type === 'replaceRutubePlayer') {
       replaceRutubePlayer(message)
+        .then(sendResponse)
+        .catch((error) => sendResponse({ ok: false, error: error.message }));
+      return true;
+    }
+
+    if (message.type === 'replacePihPlayer') {
+      replacePihPlayer()
         .then(sendResponse)
         .catch((error) => sendResponse({ ok: false, error: error.message }));
       return true;
