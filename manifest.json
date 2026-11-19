@@ -4,7 +4,7 @@
 
   "name": "Twitch ReYohoho",
 
-  "version": "1.5.51",
+  "version": "1.5.53",
 
   "description": "Замена плеера Twitch на плеер ReYohoho с поиском фильмов и подсветкой ссылок в чате",
 
@@ -153,6 +153,26 @@
       "js": ["extension-utils.js", "rutube-content.js"],
 
       "css": ["rutube-content.css"],
+
+      "run_at": "document_idle"
+
+    },
+
+    {
+
+      "matches": [
+
+        "https://pinterest.com/*",
+
+        "https://www.pinterest.com/*",
+
+        "https://*.pinterest.com/*"
+
+      ],
+
+      "js": ["pinterest-reactions.js"],
+
+      "css": ["pinterest-reactions.css"],
 
       "run_at": "document_idle"
 
